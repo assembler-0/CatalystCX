@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2025 assembler-0
+// Licensed under GPL-3.0-or-later
 #pragma once
 #ifndef CATALYSTCX_HPP
 #define CATALYSTCX_HPP
@@ -99,7 +102,7 @@ public:
     [[nodiscard]] CommandResult Status();
 
     // Spawn the command and return a Child object
-    [[nodiscard]] Child Spawn();
+    [[nodiscard]] std::optional<Child> Spawn();
 
 private:
     std::string Executable;
@@ -194,21 +197,27 @@ inline void Child::Kill(const int signal) const {
 
 // Implementation of Command methods
 inline CommandResult Command::Status() {
-    return Spawn().Wait(TimeoutDuration);
+    if (const auto child = Spawn()) {
+        return child->Wait(TimeoutDuration);
+    }
+    CommandResult result;
+    result.ExitCode = 127;
+    result.Stderr = "Failed to spawn process";
+    return result;
 }
 
-inline Child Command::Spawn() {
+inline std::optional<Child> Command::Spawn() {
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
 
     if (!ExecutionValidator::CanExecuteCommand(args_vec)) {
-        return {-1, -1, -1};
+        return std::nullopt;
     }
 
     int stdout_pipe[2], stderr_pipe[2];
     if (pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
-        return {-1, -1, -1};
+        return std::nullopt;
     }
 
     const pid_t pid = fork();
@@ -217,7 +226,7 @@ inline Child Command::Spawn() {
         close(stdout_pipe[1]);
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
-        return {-1, -1, -1};
+        return std::nullopt;
     }
 
     if (pid == 0) { // Child process
@@ -253,7 +262,7 @@ inline Child Command::Spawn() {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    return {pid, stdout_pipe[0], stderr_pipe[0]};
+    return Child(pid, stdout_pipe[0], stderr_pipe[0]);
 }
 
 
