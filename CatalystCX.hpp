@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025 assembler-0
 // Licensed under GPL-3.0-or-later
+
+/**
+ * @brief CatalystCX - A cross-platform single-header C++ library for executing and managing external processes (or commands).
+ * @version 0.0.1
+ * @author assembler-0
+ */
+
 #pragma once
 #ifndef CATALYSTCX_HPP
 #define CATALYSTCX_HPP
@@ -52,8 +59,8 @@ struct CommandResult {
     bool Stopped = false;
     int StopSignal = 0;
 
-#ifdef __linux__
     struct ResourceUsage {
+#if defined(__linux__)
         long UserCpuTime;
         long SystemCpuTime;
         long MaxResidentSetSize;
@@ -61,15 +68,13 @@ struct CommandResult {
         long MajorPageFaults;
         long VoluntaryContextSwitches;
         long InvoluntaryContextSwitches;
-    } Usage{};
 #elif defined(_WIN32)
-    struct ResourceUsage {
         FILETIME UserTime;
         FILETIME KernelTime;
         SIZE_T PeakWorkingSetSize;
         SIZE_T PageFaultCount;
-    } Usage{};
 #endif
+    } Usage{};
 };
 
 class Child {
@@ -156,20 +161,21 @@ public:
 #ifdef _WIN32
     static std::pair<std::string, std::string> ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle);
 private:
-    struct PipeData {
-        HANDLE Handle;
-        std::string Buffer;
-        bool Finished = false;
-    };
     static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
 #else
     static std::pair<std::string, std::string> ReadPipes(int stdout_fd, int stderr_fd);
 private:
+
     struct PipeData {
+#ifdef _WIN32
+        HANDLE Handle;
+#else
         int Fd;
+#endif
         std::string Buffer;
         bool Finished = false;
     };
+
     static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
     static bool IsPipeOpen(int fd);
 #endif
@@ -256,9 +262,26 @@ inline std::optional<Child> Command::Spawn() {
     
     PROCESS_INFORMATION pi = {};
     
-    std::string cmdline = Executable;
+    auto QuoteArgWin = [](const std::string& s) -> std::string {
+        bool need_quotes = s.find_first_of(" \t\"") != std::string::npos;
+        if (!need_quotes) return s;
+        std::string out;
+        out.push_back('"');
+        size_t bs = 0;
+        for (char c : s) {
+            if (c == '\\') { ++bs; continue; }
+            if (c == '"') { out.append(bs * 2 + 1, '\\'); out.push_back('"'); bs = 0; continue; }
+            if (bs) { out.append(bs, '\\'); bs = 0; }
+            out.push_back(c);
+        }
+        if (bs) out.append(bs * 2, '\\');
+        out.push_back('"');
+        return out;
+    };
+    std::string cmdline = QuoteArgWin(Executable);
     for (const auto& arg : Arguments) {
-        cmdline += " \"" + arg + "\"";
+        cmdline += ' ';
+        cmdline += QuoteArgWin(arg);
     }
     
     std::string env_block;

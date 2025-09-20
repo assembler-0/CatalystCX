@@ -1,63 +1,88 @@
 # CatalystCX
 
-A modern, secure, and flexible C++ single-header library for executing system commands.
+A modern, secure, and cross-platform C++ single-header library for executing system commands. (made to address `system()` injection vulnerabilities)
 
-CatalystCX provides a staged pipeline for building and executing commands, designed with security and performance in mind. It avoids shell-based execution (`system()`) in favor of direct process creation, preventing injection vulnerabilities. The API is designed to be intuitive and chainable, following modern C++ best practices.
+CatalystCX provides a fluent API for building and executing commands with security and performance as top priorities. It completely avoids shell-based execution (`system()`) in favor of direct process creation, eliminating injection vulnerabilities while providing comprehensive process monitoring and control.
+
+## Status
+
+![CI/CD](https://github.com/assembler-0/CatalystCX/actions/workflows/ci.yml/badge.svg)
+[![codecov](https://codecov.io/gh/assembler-0/CatalystCX/branch/main/graph/badge.svg)](https://codecov.io/gh/assembler-0/CatalystCX)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+![Version](https://img.shields.io/badge/Version-0.0.1-brightgreen.svg)
 
 ## Features
-
-- **Secure by Design:** Commands and arguments are passed directly to the OS, avoiding shell interpretation and injection vulnerabilities.
-- **Fluent Builder API:** A chainable, easy-to-use builder pattern for constructing commands.
-- **Standard Stream Capture:** Capture `stdout` and `stderr` with ease.
-- **Asynchronous Execution:** Spawn processes and manage them asynchronously.
-- **Timeouts:** Set timeouts for commands to prevent them from running indefinitely.
-- **Resource Monitoring (Linux):** Get detailed information about execution time, CPU usage, and memory consumption.
-- **Robust Error Handling:** Uses `std::optional` to safely handle process spawning failures.
-- **Single Header:** Easy to integrate into any project.
+- **No Shell Execution:** Direct process creation prevents command injection
+- **Argument Validation:** Built-in executable verification
+- **Safe Defaults:** Secure by default configuration
+- **Zero-Copy Operations:** Efficient memory management
+- **Async I/O:** Non-blocking pipe reading with `poll()`/`WaitForMultipleObjects`
+- **Platform-Specific Optimizations:** `posix_spawn()` on macOS, `CreateProcess` on Windows
+- **Linux:** Full feature support with detailed resource monitoring
+- **macOS:** Optimized with `posix_spawn()` for better performance
+- **Windows:** Native `CreateProcess` API integration
+- **Signal Handling:** Detailed process termination analysis
+- **Resource Usage:** CPU time, memory usage, page faults, context switches
+- **Execution Metrics:** Precise timing and performance data
+- **Fluent Builder API:** Chainable, intuitive command construction
+- **Modern C++20:** Uses latest language features and best practices
+- **Single Header:** Easy integration, no external dependencies
 
 ## Requirements
 
-- C++20 compatible compiler (e.g., GCC 10+, Clang 11+)
-- CMake 3.10+
+- **C++20** compatible compiler:
+  - GCC 11+ (Linux/macOS)
+  - Clang 14+ (Linux/macOS)
+  - MSVC 2022+ (Windows)
+- **CMake 3.10+**
+- **Platform Support:**
+  - Linux (Ubuntu 20.04+, RHEL 8+)
+  - macOS (10.15+)
+  - Windows (10/11)
 
-## Building the Project
+## Quick Start
 
-```bash
-# Configure the project
-cmake -B build
+### Single Header Integration
 
-# Build the example executable
-cmake --build build
+```cpp
+#include <CatalystCX.hpp>
+
+int main() {
+    auto result = Command("echo").Arg("Hello, World!").Status();
+    std::cout << result.Stdout; // "Hello, World!\n"
+    return result.ExitCode;
+}
 ```
 
-## Running the Example
-
-To run the example application included in `CatalystCX.cpp`, use the `run` target:
+### Building from Source
 
 ```bash
-cmake --build build --target run
-```
-
-## Installation
-
-To install the `CatalystCX.hpp` header to your system's include directory (e.g., `/usr/local/include`), use the `install` target:
-
-```bash
-# First, build the project
+# Clone and build
+git clone https://github.com/assembler-0/CatalystCX.git
+cd CatalystCX
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Then, install the header
+# Run tests
+cmake --build build --target test
+```
+
+### Installation
+
+```bash
+# System-wide installation
 sudo cmake --install build
+
+# Or just copy the header
+cp CatalystCX.hpp /your/project/include/
 ```
 
 ## API Usage Guide
 
 ### Basic Execution
 
-To execute a command and wait for it to complete, use the `Status()` method. It returns a `CommandResult` struct.
-
 ```cpp
-#include "CatalystCX.hpp"
+#include <CatalystCX.hpp>
 #include <iostream>
 
 int main() {
@@ -70,8 +95,6 @@ int main() {
 
 ### Asynchronous Execution
 
-To spawn a process without blocking, use the `Spawn()` method. This returns an `std::optional<Child>`. You can `Wait()` for the result later.
-
 ```cpp
 if (auto child = Command("sleep").Arg("5").Spawn()) {
     std::cout << "Process spawned with PID: " << child->GetPid() << std::endl;
@@ -79,17 +102,13 @@ if (auto child = Command("sleep").Arg("5").Spawn()) {
     // ... do other work ...
 
     CommandResult result = child->Wait();
-    std::cout << "Sleep command finished."
- << std::endl;
+    std::cout << "Sleep command finished." << std::endl;
 } else {
-    std::cerr << "Failed to spawn process."
- << std::endl;
+    std::cerr << "Failed to spawn process." << std::endl;
 }
 ```
 
 ### Timeouts
-
-Set a timeout for a command using the `Timeout()` method. The `CommandResult` will indicate if the command timed out.
 
 ```cpp
 auto result = Command("ping").Arg("8.8.8.8")
@@ -97,50 +116,136 @@ auto result = Command("ping").Arg("8.8.8.8")
                   .Status();
 
 if (result.TimedOut) {
-    std::cout << "Command timed out!"
- << std::endl;
+    std::cout << "Command timed out!" << std::endl;
 }
 ```
 
-### Error Handling
-
-`Spawn()` returns a `std::optional<Child>`. Always check if it contains a value before using it.
+### Environment Variables and Working Directory
 
 ```cpp
-if (auto child = Command("this-command-does-not-exist").Spawn()) {
-    // This block will not be executed
-    child->Wait();
-} else {
-    std::cerr << "Failed to spawn command, as expected."
- << std::endl;
+auto result = Command("printenv")
+    .Arg("MY_VAR")
+    .Environment("MY_VAR", "Hello")
+    .WorkingDirectory("/tmp")
+    .Status();
+
+std::cout << result.Stdout; // "Hello\n"
+```
+
+### Signal Handling and Process Information
+
+```cpp
+auto child = Command("sleep").Arg("10").Spawn();
+if (child) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    child->Kill(SIGTERM);
+    
+    auto result = child->Wait();
+    if (result.KilledBySignal) {
+        std::cout << "Process killed by signal: " 
+                  << SignalInfo::GetSignalName(result.TerminatingSignal) 
+                  << std::endl;
+    }
+    
+    // Get human-readable process info
+    std::cout << SignalInfo::GetProcessInfo(result) << std::endl;
 }
 ```
 
-### Accessing Detailed Results
-
-The `CommandResult` struct contains detailed information about the execution.
+### Resource Monitoring
 
 ```cpp
-CommandResult result = Command("your-command").Status();
+CommandResult result = Command("your-intensive-command").Status();
 
 std::cout << "Exit Code: " << result.ExitCode << std::endl;
-std::cout << "Execution Time: " << result.ExecutionTime.count() << "s"
- << std::endl;
+std::cout << "Execution Time: " << result.ExecutionTime.count() << "s" << std::endl;
 
 #ifdef __linux__
-    std::cout << "User CPU Time: " << result.Usage.UserCpuTime << "us"
- << std::endl;
-    std::cout << "System CPU Time: " << result.Usage.SystemCpuTime << "us"
- << std::endl;
-    std::cout << "Max Memory Usage: " << result.Usage.MaxResidentSetSize << " KB"
- << std::endl;
+std::cout << "CPU Usage:\n";
+std::cout << "  User: " << result.Usage.UserCpuTime << "μs\n";
+std::cout << "  System: " << result.Usage.SystemCpuTime << "μs\n";
+std::cout << "Memory:\n";
+std::cout << "  Peak RSS: " << result.Usage.MaxResidentSetSize << " KB\n";
+std::cout << "  Page Faults: " << result.Usage.MajorPageFaults << std::endl;
+#elif defined(_WIN32)
+std::cout << "Peak Memory: " << result.Usage.PeakWorkingSetSize << " bytes\n";
+std::cout << "Page Faults: " << result.Usage.PageFaultCount << std::endl;
 #endif
+```
+
+## Advanced Usage
+
+### Batch Processing
+
+```cpp
+std::vector<std::string> files = {"file1.txt", "file2.txt", "file3.txt"};
+std::vector<std::future<CommandResult>> futures;
+
+for (const auto& file : files) {
+    futures.push_back(std::async(std::launch::async, [&file]() {
+        return Command("wc").Args({"-l", file}).Status();
+    }));
+}
+
+for (auto& future : futures) {
+    auto result = future.get();
+    std::cout << "Lines: " << result.Stdout;
+}
+```
+
+### Error Recovery
+
+```cpp
+CommandResult result;
+int retries = 3;
+
+while (retries-- > 0) {
+    result = Command("flaky-command")
+        .Timeout(std::chrono::seconds(30))
+        .Status();
+    
+    if (result.ExitCode == 0) break;
+    
+    std::cerr << "Attempt failed, retries left: " << retries << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+```
+
+## Testing
+
+```bash
+# Run full test suite
+cmake --build build --target test
+
+# Run with sanitizers
+cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+cmake --build build-debug --target test
+
+# Generate coverage report
+cmake -B build-coverage -DCMAKE_CXX_FLAGS="--coverage"
+cmake --build build-coverage --target test
+lcov --capture --directory build-coverage --output-file coverage.info
+```
+
+
+### Development Setup
+
+```bash
+# Install development dependencies
+sudo apt-get install cppcheck clang-tidy valgrind lcov
+
+# Run static analysis
+cppcheck --enable=all --std=c++20 CatalystCX.hpp
+clang-tidy CatalystCX.cpp -checks='*'
 ```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request.
+Contributions are welcome! Please feel free to submit a pull request, open an issue, or contact me directly. :)
 
 ## License
 
-This project is licensed under the GPLv3 License.
+This project is licensed under the [GPLv3 License](LICENSE) - see the LICENSE file for details.
+
+---

@@ -83,8 +83,7 @@ jobs:
 
     - name: Run clang-tidy
       run: |
-        clang-tidy CatalystCX.cpp \
-          -p build --checks='-*,readability-*,performance-*,modernize-*'
+          clang-tidy CatalystCX.hpp -p build --checks='-*,readability-*,performance-*,modernize-*'
 
   sanitizers:
     name: Sanitizer Tests
@@ -148,8 +147,9 @@ jobs:
 
     - name: Run Benchmarks
       run: |
-        echo "=== Performance Test ==="
-        time cmake --build build --target test
-        echo "=== Memory Usage Test ==="
-        valgrind --tool=massif --massif-out-file=massif.out \
-          ./build/test_suite 2>/dev/null || true
+          echo "=== Performance Test ==="
+          time ctest --test-dir build --output-on-failure
+          echo "=== Memory Usage Test ==="
+          sudo apt-get update && sudo apt-get install -y valgrind
+          valgrind --tool=massif --massif-out-file=massif.out \
+            ./build/cxtest 2>/dev/null || true
