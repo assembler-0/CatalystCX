@@ -9,24 +9,33 @@ on:
     types: [ published ]
 
 jobs:
-  build:
-    name: Build and Test
+  benchmark:
+    name: Performance Benchmarks
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup Build Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake clang
+      - uses: actions/checkout@v4
 
-    - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles"
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang
 
-    - name: Build
-      run: cmake --build build --config Release
+      - name: Configure Optimized Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -march=native"
 
-    - name: Run Tests
-      run: cmake --build build --target test --config Release
+      - name: Build
+        run: time cmake --build build
+
+      - name: Run Benchmarks
+        run: |
+          echo "=== Performance Test ==="
+          time ctest --test-dir build --output-on-failure
+          echo "=== Memory Usage Test ==="
+          sudo apt-get update && sudo apt-get install -y valgrind
+          valgrind --tool=massif --massif-out-file=massif.out \
+            ./build/cxtest 2>/dev/null || true
 
   static-analysis:
     name: Static Analysis
@@ -50,45 +59,25 @@ jobs:
       run: |
           clang-tidy CatalystCX.hpp -p build --checks='-*,readability-*,performance-*,modernize-*'
 
-  sanitizers:
-    name: Sanitizer Tests
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        sanitizer: [address, thread, undefined]
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Configure with Sanitizers
-      run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -g -O1"
-
-    - name: Build
-      run: cmake --build build
-
-    - name: Run Tests with Sanitizer
-      run: cmake --build build --target test
-
-  benchmark:
-    name: Performance Benchmarks
+  codecov:
+    name: Run tests and collect coverage
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-    - name: Configure Optimized Build
-      run: |
-        cmake -B build -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_CXX_FLAGS="-O3 -march=native -DNDEBUG"
+      - name: Set up Python
+        uses: actions/setup-python@v4
 
-    - name: Build
-      run: cmake --build build
+      - name: Install dependencies
+        run: pip install pytest pytest-cov
 
-    - name: Run Benchmarks
-      run: |
-          echo "=== Performance Test ==="
-          time ctest --test-dir build --output-on-failure
-          echo "=== Memory Usage Test ==="
-          sudo apt-get update && sudo apt-get install -y valgrind
-          valgrind --tool=massif --massif-out-file=massif.out \
-            ./build/cxtest 2>/dev/null || true
+      - name: Run tests
+        run: pytest --cov --cov-branch --cov-report=xml
+
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

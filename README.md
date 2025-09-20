@@ -18,9 +18,6 @@ CatalystCX provides a fluent API for building and executing commands with securi
 - **Zero-Copy Operations:** Efficient memory management
 - **Async I/O:** Non-blocking pipe reading with `poll()`/`WaitForMultipleObjects`
 - **Platform-Specific Optimizations:** `posix_spawn()` on macOS, `CreateProcess` on Windows
-- **Linux:** Full feature support with detailed resource monitoring
-- **macOS:** Optimized with `posix_spawn()` for better performance
-- **Windows:** Native `CreateProcess` API integration
 - **Signal Handling:** Detailed process termination analysis
 - **Resource Usage:** CPU time, memory usage, page faults, context switches
 - **Execution Metrics:** Precise timing and performance data
@@ -48,7 +45,7 @@ CatalystCX provides a fluent API for building and executing commands with securi
 #include <CatalystCX.hpp>
 
 int main() {
-    auto result = Command("echo").Arg("Hello, World!").Status();
+    auto result = Command("echo").Arg("Hello, World!").Execute();
     std::cout << result.Stdout; // "Hello, World!\n"
     return result.ExitCode;
 }
@@ -86,7 +83,7 @@ cp CatalystCX.hpp /your/project/include/
 #include <iostream>
 
 int main() {
-    CommandResult result = Command("ls").Arg("-l").Status();
+    CommandResult result = Command("ls").Arg("-l").Execute();
 
     std::cout << "Exit Code: " << result.ExitCode << std::endl;
     std::cout << "Stdout:\n" << result.Stdout << std::endl;
@@ -113,7 +110,7 @@ if (auto child = Command("sleep").Arg("5").Spawn()) {
 ```cpp
 auto result = Command("ping").Arg("8.8.8.8")
                   .Timeout(std::chrono::seconds(2))
-                  .Status();
+                  .Execute();
 
 if (result.TimedOut) {
     std::cout << "Command timed out!" << std::endl;
@@ -127,7 +124,7 @@ auto result = Command("printenv")
     .Arg("MY_VAR")
     .Environment("MY_VAR", "Hello")
     .WorkingDirectory("/tmp")
-    .Status();
+    .Execute();
 
 std::cout << result.Stdout; // "Hello\n"
 ```
@@ -155,7 +152,7 @@ if (child) {
 ### Resource Monitoring
 
 ```cpp
-CommandResult result = Command("your-intensive-command").Status();
+CommandResult result = Command("your-intensive-command").Execute();
 
 std::cout << "Exit Code: " << result.ExitCode << std::endl;
 std::cout << "Execution Time: " << result.ExecutionTime.count() << "s" << std::endl;
@@ -183,7 +180,7 @@ std::vector<std::future<CommandResult>> futures;
 
 for (const auto& file : files) {
     futures.push_back(std::async(std::launch::async, [&file]() {
-        return Command("wc").Args({"-l", file}).Status();
+        return Command("wc").Args({"-l", file}).Execute();
     }));
 }
 
@@ -202,7 +199,7 @@ int retries = 3;
 while (retries-- > 0) {
     result = Command("flaky-command")
         .Timeout(std::chrono::seconds(30))
-        .Status();
+        .Execute();
     
     if (result.ExitCode == 0) break;
     

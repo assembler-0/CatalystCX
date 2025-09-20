@@ -46,6 +46,8 @@ extern char **environ;
 
 namespace fs = std::filesystem;
 
+#define EXIT_FAIL_EC 127
+
 struct CommandResult {
     int ExitCode{};
     std::string Stdout;
@@ -464,7 +466,7 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
             }
 
             if (wait_result == -1) {
-                result.ExitCode = 127;
+                result.ExitCode = EXIT_FAIL_EC;
                 result.Stderr = "waitpid failed";
                 break;
             }
@@ -610,7 +612,7 @@ inline std::optional<Child> Command::Spawn() {
 
     if (pid == 0) {
         if (WorkDir && chdir(WorkDir->c_str()) != 0) {
-            _exit(127);
+            _exit(EXIT_FAIL_EC);
         }
 
         for(const auto &[key, value] : EnvVars) {
@@ -630,7 +632,7 @@ inline std::optional<Child> Command::Spawn() {
         argv.push_back(nullptr);
 
         execvp(argv[0], argv.data());
-        _exit(127);
+        _exit(EXIT_FAIL_EC);
     }
 #endif
 
@@ -709,8 +711,8 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
     size_t end = path_str.find(':');
 
     while (start <= path_str.length()) {
-        std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
-        if (!dir.empty()) {
+        if (std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
+            !dir.empty()) {
             std::string full_path = dir + "/" + command;
             if (access(full_path.c_str(), X_OK) == 0) {
                 return true;
@@ -735,7 +737,7 @@ inline CommandResult Command::Execute() {
         return child->Wait(TimeoutDuration);
     }
     CommandResult result;
-    result.ExitCode = 127;
+    result.ExitCode = EXIT_FAIL_EC;
     result.Stderr = "Failed to spawn process";
     return result;
 }
