@@ -5,10 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic -Wall -Wextra -O2")
 
 # Test suite executable
-add_executable(cxtest Evaluate.cpp CatalystCX.hpp)
+add_executable(cxtest Evaluate.cpp)
 
 # Custom target to run tests
 add_custom_target(test
@@ -19,6 +19,7 @@ add_custom_target(test
 
 add_compile_definitions(
         WCOREDUMP
+        EXIT_FAIL_EC=127
 )
 
 # Install header
