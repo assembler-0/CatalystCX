@@ -5,6 +5,9 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "CatalystCX.hpp"
 
 class TestRunner {
@@ -12,7 +15,7 @@ class TestRunner {
     int failed = 0;
     
 public:
-    void Assert(bool condition, const std::string& test_name) {
+    void Assert(const bool condition, const std::string& test_name) {
         if (condition) {
             std::cout << "[PASS] " << test_name << std::endl;
             passed++;
@@ -22,31 +25,31 @@ public:
         }
     }
     
-    void PrintSummary() {
+    void PrintSummary() const {
         std::cout << "\n=== Test Summary ===" << std::endl;
         std::cout << "Passed: " << passed << std::endl;
         std::cout << "Failed: " << failed << std::endl;
         std::cout << "Total: " << (passed + failed) << std::endl;
     }
     
-    int GetFailedCount() const { return failed; }
+    [[nodiscard]] int GetFailedCount() const { return failed; }
 };
 
 void TestBasicExecution(TestRunner& runner) {
     std::cout << "\n=== Basic Execution Tests ===" << std::endl;
     
     // Test simple command
-    auto result = Command("echo").Arg("hello").Status();
+    auto result = Command("echo").Arg("hello").Execute();
     runner.Assert(result.ExitCode == 0, "Echo command success");
     runner.Assert(result.Stdout.find("hello") != std::string::npos, "Echo output correct");
     
     // Test command with multiple args
-    result = Command("echo").Args({"hello", "world"}).Status();
+    result = Command("echo").Args({"hello", "world"}).Execute();
     runner.Assert(result.ExitCode == 0, "Multiple args success");
     runner.Assert(result.Stdout.find("hello world") != std::string::npos, "Multiple args output");
     
     // Test command failure
-    result = Command("false").Status();
+    result = Command("false").Execute();
     runner.Assert(result.ExitCode == 1, "False command exit code");
 }
 
@@ -54,14 +57,14 @@ void TestAsyncExecution(TestRunner& runner) {
     std::cout << "\n=== Async Execution Tests ===" << std::endl;
     
     // Test spawn and wait
-    auto child = Command("sleep").Arg("1").Spawn();
+    const auto child = Command("sleep").Arg("1").Spawn();
     runner.Assert(child.has_value(), "Sleep spawn success");
     
     if (child) {
-        pid_t pid = child->GetPid();
+        const pid_t pid = child->GetPid();
         runner.Assert(pid > 0, "Valid PID returned");
-        
-        auto result = child->Wait();
+
+        const auto result = child->Wait();
         runner.Assert(result.ExitCode == 0, "Sleep completed successfully");
         runner.Assert(result.ExecutionTime.count() >= 1.0, "Sleep duration correct");
     }
@@ -71,9 +74,9 @@ void TestTimeout(TestRunner& runner) {
     std::cout << "\n=== Timeout Tests ===" << std::endl;
     
     // Test timeout functionality
-    auto start = std::chrono::steady_clock::now();
-    auto result = Command("sleep").Arg("5").Timeout(std::chrono::seconds(1)).Status();
-    auto duration = std::chrono::steady_clock::now() - start;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = Command("sleep").Arg("5").Timeout(std::chrono::seconds(1)).Execute();
+    const auto duration = std::chrono::steady_clock::now() - start;
     
     runner.Assert(result.TimedOut, "Command timed out");
     runner.Assert(duration < std::chrono::seconds(2), "Timeout enforced quickly");
@@ -83,11 +86,10 @@ void TestSignalHandling(TestRunner& runner) {
     std::cout << "\n=== Signal Handling Tests ===" << std::endl;
     
     // Test SIGTERM handling
-    auto child = Command("sleep").Arg("10").Spawn();
-    if (child) {
+    if (const auto child = Command("sleep").Arg("10").Spawn()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         child->Kill(SIGTERM);
-        auto result = child->Wait();
+        const auto result = child->Wait();
         
         runner.Assert(result.KilledBySignal, "Process killed by signal");
         runner.Assert(result.TerminatingSignal == SIGTERM, "Correct terminating signal");
@@ -101,10 +103,10 @@ void TestSignalHandling(TestRunner& runner) {
 
 void TestEnvironmentVariables(TestRunner& runner) {
     std::cout << "\n=== Environment Variable Tests ===" << std::endl;
-    
-    auto result = Command("printenv").Arg("TEST_VAR")
+
+    const auto result = Command("printenv").Arg("TEST_VAR")
                     .Environment("TEST_VAR", "test_value")
-                    .Status();
+                    .Execute();
     
     runner.Assert(result.ExitCode == 0, "Environment variable set");
     runner.Assert(result.Stdout.find("test_value") != std::string::npos, "Environment variable value");
@@ -112,8 +114,8 @@ void TestEnvironmentVariables(TestRunner& runner) {
 
 void TestWorkingDirectory(TestRunner& runner) {
     std::cout << "\n=== Working Directory Tests ===" << std::endl;
-    
-    auto result = Command("pwd").WorkingDirectory("/tmp").Status();
+
+    const auto result = Command("pwd").WorkingDirectory("/tmp").Execute();
     runner.Assert(result.ExitCode == 0, "Working directory command success");
     runner.Assert(result.Stdout.find("/tmp") != std::string::npos, "Working directory set correctly");
 }
@@ -122,11 +124,11 @@ void TestErrorHandling(TestRunner& runner) {
     std::cout << "\n=== Error Handling Tests ===" << std::endl;
     
     // Test non-existent command
-    auto child = Command("nonexistentcommand12345").Spawn();
+    const auto child = Command("nonexistentcommand12345").Spawn();
     runner.Assert(!child.has_value(), "Non-existent command fails to spawn");
     
     // Test command that writes to stderr
-    auto result = Command("sh").Args({"-c", "echo error >&2; exit 42"}).Status();
+    const auto result = Command("sh").Args({"-c", "echo error >&2; exit 42"}).Execute();
     runner.Assert(result.ExitCode == 42, "Custom exit code preserved");
     runner.Assert(result.Stderr.find("error") != std::string::npos, "Stderr captured");
 }
@@ -135,7 +137,7 @@ void TestResourceUsage(TestRunner& runner) {
     std::cout << "\n=== Resource Usage Tests ===" << std::endl;
     
 #ifdef __linux__
-    auto result = Command("dd").Args({"if=/dev/zero", "of=/dev/null", "bs=1M", "count=10"}).Status();
+    const auto result = Command("dd").Args({"if=/dev/zero", "of=/dev/null", "bs=1M", "count=10"}).Execute();
     runner.Assert(result.ExitCode == 0, "DD command success");
     runner.Assert(result.Usage.UserCpuTime >= 0, "User CPU time recorded");
     runner.Assert(result.Usage.SystemCpuTime >= 0, "System CPU time recorded");
@@ -149,12 +151,12 @@ void TestPipeHandling(TestRunner& runner) {
     std::cout << "\n=== Pipe Handling Tests ===" << std::endl;
     
     // Test large output
-    auto result = Command("seq").Args({"1", "1000"}).Status();
+    auto result = Command("seq").Args({"1", "1000"}).Execute();
     runner.Assert(result.ExitCode == 0, "Large output command success");
     runner.Assert(result.Stdout.find("1000") != std::string::npos, "Large output captured");
     
     // Test mixed stdout/stderr
-    result = Command("sh").Args({"-c", "echo stdout; echo stderr >&2"}).Status();
+    result = Command("sh").Args({"-c", "echo stdout; echo stderr >&2"}).Execute();
     runner.Assert(result.Stdout.find("stdout") != std::string::npos, "Stdout separated");
     runner.Assert(result.Stderr.find("stderr") != std::string::npos, "Stderr separated");
 }
@@ -165,9 +167,9 @@ void TestExecutionValidator(TestRunner& runner) {
     runner.Assert(ExecutionValidator::IsCommandExecutable("ls"), "ls is executable");
     runner.Assert(ExecutionValidator::IsCommandExecutable("echo"), "echo is executable");
     runner.Assert(!ExecutionValidator::IsCommandExecutable("nonexistentcmd123"), "Non-existent not executable");
-    
-    std::vector<std::string> valid_args = {"ls", "-l"};
-    std::vector<std::string> invalid_args = {"nonexistentcmd123"};
+
+    const std::vector<std::string> valid_args = {"ls", "-l"};
+    const std::vector<std::string> invalid_args = {"nonexistentcmd123"};
     
     runner.Assert(ExecutionValidator::CanExecuteCommand(valid_args), "Valid command can execute");
     runner.Assert(!ExecutionValidator::CanExecuteCommand(invalid_args), "Invalid command cannot execute");
@@ -177,12 +179,12 @@ void TestProcessInfo(TestRunner& runner) {
     std::cout << "\n=== Process Info Tests ===" << std::endl;
     
     // Test normal exit
-    auto result = Command("true").Status();
+    auto result = Command("true").Execute();
     std::string info = SignalInfo::GetProcessInfo(result);
     runner.Assert(info.find("Exited normally") != std::string::npos, "Normal exit info");
     
     // Test timeout info
-    result = Command("sleep").Arg("5").Timeout(std::chrono::milliseconds(100)).Status();
+    result = Command("sleep").Arg("5").Timeout(std::chrono::milliseconds(100)).Execute();
     info = SignalInfo::GetProcessInfo(result);
     runner.Assert(info.find("timed out") != std::string::npos, "Timeout info");
 }
@@ -191,18 +193,24 @@ void TestEdgeCases(TestRunner& runner) {
     std::cout << "\n=== Edge Case Tests ===" << std::endl;
     
     // Empty command
-    std::vector<std::string> empty_args;
+    constexpr std::vector<std::string> empty_args;
     runner.Assert(!ExecutionValidator::CanExecuteCommand(empty_args), "Empty args rejected");
     
     // Command with spaces in args
-    auto result = Command("echo").Arg("hello world").Status();
+    auto result = Command("echo").Arg("hello world").Execute();
     runner.Assert(result.Stdout.find("hello world") != std::string::npos, "Spaces in args handled");
     
     // Very short timeout
-    result = Command("sleep").Arg("1").Timeout(std::chrono::milliseconds(1)).Status();
+    result = Command("sleep").Arg("1").Timeout(std::chrono::milliseconds(1)).Execute();
     runner.Assert(result.TimedOut, "Very short timeout works");
 }
 
+#ifndef _WIN32
+void TestLargeStdoutStderr(TestRunner& runner);
+void TestWorkingDirectoryRelativeExec(TestRunner& runner);
+void TestExecutionValidatorFilePermissions(TestRunner& runner);
+void TestEnvMergingAndOverride(TestRunner& runner);
+#endif
 int main() {
     TestRunner runner;
     
@@ -221,8 +229,132 @@ int main() {
     TestExecutionValidator(runner);
     TestProcessInfo(runner);
     TestEdgeCases(runner);
+#ifndef _WIN32
+    TestLargeStdoutStderr(runner);
+    TestWorkingDirectoryRelativeExec(runner);
+    TestExecutionValidatorFilePermissions(runner);
+    TestEnvMergingAndOverride(runner);
+#endif
     
     runner.PrintSummary();
     
     return runner.GetFailedCount();
 }
+
+// ===== Additional Linux-focused tests and helpers =====
+#ifndef _WIN32
+static std::string JoinPath(const std::string& a, const std::string& b) {
+    if (a.empty()) return b;
+    if (a.back() == '/') return a + b;
+    return a + "/" + b;
+}
+
+static std::string MakeTempDir() {
+    std::string tmpl = "/tmp/catalystcxXXXXXX";
+    std::vector buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    char* p = mkdtemp(buf.data());
+    if (!p) return {};
+    return {p};
+}
+
+static bool WriteTextFile(const std::string& path, const std::string& content) {
+    std::ofstream ofs(path, std::ios::out | std::ios::trunc);
+    if (!ofs) return false;
+    ofs << content;
+    return ofs.good();
+}
+
+static void CleanupTemp(const std::string& dir, const std::vector<std::string>& files) {
+    for (const auto& f : files) {
+        unlink(JoinPath(dir, f).c_str());
+    }
+    rmdir(dir.c_str());
+}
+
+void TestLargeStdoutStderr(TestRunner& runner) {
+    std::cout << "\n=== Large Stdout/Stderr Tests ===" << std::endl;
+
+    // Large stdout (~5MB)
+    auto res = Command("sh").Args({"-c", "dd if=/dev/zero bs=1M count=5 2>/dev/null"}).Execute();
+    runner.Assert(res.ExitCode == 0, "Large stdout command success");
+    runner.Assert(res.Stdout.size() >= 5 * 1024 * 1024, "Large stdout captured without deadlock");
+
+    // Large stderr (~5MB zeros)
+    res = Command("sh").Args({"-c", "dd if=/dev/zero of=/dev/stderr bs=1M count=5 1>/dev/null"}).Execute();
+    runner.Assert(res.ExitCode == 0, "Large stderr command success");
+    runner.Assert(res.Stderr.size() >= 5 * 1024 * 1024, "Large stderr captured without deadlock");
+
+    // Interleaved stdout and stderr
+    res = Command("sh").Args({"-c", "for i in $(seq 1 2000); do echo outline; echo errline >&2; done"}).Execute();
+    runner.Assert(res.ExitCode == 0, "Interleaved out/err success");
+    runner.Assert(res.Stdout.find("outline") != std::string::npos, "Interleaved stdout captured");
+    runner.Assert(res.Stderr.find("errline") != std::string::npos, "Interleaved stderr captured");
+}
+
+void TestWorkingDirectoryRelativeExec(TestRunner& runner) {
+    std::cout << "\n=== Working Directory Relative Exec Tests ===" << std::endl;
+
+    const std::string dir = MakeTempDir();
+    if (dir.empty()) {
+        std::cout << "[SKIP] Unable to create temp dir" << std::endl;
+        return;
+    }
+    const std::string script = "script.sh";
+    const std::string script_path = JoinPath(dir, script);
+
+    if (!WriteTextFile(script_path, "#!/bin/sh\necho temp-ok\n")) {
+        std::cout << "[SKIP] Unable to write temp script" << std::endl;
+        rmdir(dir.c_str());
+        return;
+    }
+    chmod(script_path.c_str(), 0755);
+
+    const auto res = Command("sh").Args({"-c", "./" + script}).WorkingDirectory(dir).Execute();
+    runner.Assert(res.ExitCode == 0, "Run relative executable in working dir");
+    runner.Assert(res.Stdout.find("temp-ok") != std::string::npos, "Relative exec output correct");
+
+    CleanupTemp(dir, {script});
+}
+
+void TestExecutionValidatorFilePermissions(TestRunner& runner) {
+    std::cout << "\n=== Execution Validator File Permission Tests ===" << std::endl;
+    const std::string dir = MakeTempDir();
+    if (dir.empty()) {
+        std::cout << "[SKIP] Unable to create temp dir" << std::endl;
+        return;
+    }
+    std::string fname = "permtest.sh";
+    const std::string path = JoinPath(dir, fname);
+
+    WriteTextFile(path, "#!/bin/sh\necho ok\n");
+    chmod(path.c_str(), 0644); // no exec
+
+    runner.Assert(!ExecutionValidator::IsFileExecutable(path), "Non-executable file rejected");
+    runner.Assert(!ExecutionValidator::IsCommandExecutable("./" + fname), "IsCommandExecutable false for non-exec");
+
+    chmod(path.c_str(), 0755);
+
+    runner.Assert(ExecutionValidator::IsFileExecutable(path), "Executable bit recognized");
+    runner.Assert(ExecutionValidator::IsCommandExecutable(path) == true, "IsCommandExecutable true for exec");
+
+    CleanupTemp(dir, {fname});
+}
+
+void TestEnvMergingAndOverride(TestRunner& runner) {
+    std::cout << "\n=== Environment Merge/Override Tests ===" << std::endl;
+
+    // New variable should be visible
+    auto res = Command("sh").Args({"-c", "printf '%s' \"$NEW_VAR\""})
+                    .Environment("NEW_VAR", "new_value").Execute();
+    runner.Assert(res.ExitCode == 0, "New env var set");
+    runner.Assert(res.Stdout == "new_value", "New env var value visible");
+
+    // Override an env var for the child only
+    // Use HOME which should exist; don't leak to parent
+    res = Command("sh").Args({"-c", "printf '%s' \"$HOME\""})
+            .Environment("HOME", "/tmp/testhome").Execute();
+    runner.Assert(res.ExitCode == 0, "Override env var success");
+    runner.Assert(res.Stdout == "/tmp/testhome", "Override value applied in child");
+}
+#endif // _WIN32

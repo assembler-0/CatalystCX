@@ -145,7 +145,7 @@ public:
         return *this;
     }
 
-    [[nodiscard]] CommandResult Status();
+    [[nodiscard]] CommandResult Execute();
     [[nodiscard]] std::optional<Child> Spawn();
 
 private:
@@ -157,15 +157,6 @@ private:
 };
 
 class AsyncPipeReader {
-public:
-#ifdef _WIN32
-    static std::pair<std::string, std::string> ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle);
-private:
-    static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
-#else
-    static std::pair<std::string, std::string> ReadPipes(int stdout_fd, int stderr_fd);
-private:
-
     struct PipeData {
 #ifdef _WIN32
         HANDLE Handle;
@@ -175,6 +166,14 @@ private:
         std::string Buffer;
         bool Finished = false;
     };
+public:
+#ifdef _WIN32
+    static std::pair<std::string, std::string> ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle);
+private:
+    static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
+#else
+    static std::pair<std::string, std::string> ReadPipes(int stdout_fd, int stderr_fd);
+private:
 
     static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
     static bool IsPipeOpen(int fd);
@@ -193,40 +192,44 @@ public:
 inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
     CommandResult result;
-    
+
+    // Start asynchronous pipe reader to avoid deadlocks on full pipes
+    auto reader_future = std::async(std::launch::async, AsyncPipeReader::ReadPipes, StdoutHandle, StderrHandle);
+
     DWORD wait_time = timeout ? static_cast<DWORD>(timeout->count() * 1000) : INFINITE;
     DWORD wait_result = WaitForSingleObject(ProcessHandle, wait_time);
-    
-    auto end_time = std::chrono::steady_clock::now();
-    result.ExecutionTime = end_time - start_time;
-    
+
     if (wait_result == WAIT_TIMEOUT) {
         result.TimedOut = true;
         TerminateProcess(ProcessHandle, 1);
         WaitForSingleObject(ProcessHandle, INFINITE);
     }
-    
-    DWORD exit_code;
+
+    DWORD exit_code = 0;
     GetExitCodeProcess(ProcessHandle, &exit_code);
     result.ExitCode = static_cast<int>(exit_code);
-    
-    FILETIME creation_time, exit_time;
-    GetProcessTimes(ProcessHandle, &creation_time, &exit_time, 
-                   &result.Usage.KernelTime, &result.Usage.UserTime);
-    
+
+    FILETIME creation_time{}, exit_time{};
+    GetProcessTimes(ProcessHandle, &creation_time, &exit_time,
+                    &result.Usage.KernelTime, &result.Usage.UserTime);
+
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(ProcessHandle, &pmc, sizeof(pmc))) {
         result.Usage.PeakWorkingSetSize = pmc.PeakWorkingSetSize;
         result.Usage.PageFaultCount = pmc.PageFaultCount;
     }
-    
-    auto [stdout_result, stderr_result] = AsyncPipeReader::ReadPipes(StdoutHandle, StderrHandle);
+
+    // Gather output after process has exited (pipes should be closed by child)
+    auto [stdout_result, stderr_result] = reader_future.get();
     result.Stdout = std::move(stdout_result);
     result.Stderr = std::move(stderr_result);
-    
+
     CloseHandle(StdoutHandle);
     CloseHandle(StderrHandle);
-    
+
+    auto end_time = std::chrono::steady_clock::now();
+    result.ExecutionTime = end_time - start_time;
+
     return result;
 }
 
@@ -284,12 +287,42 @@ inline std::optional<Child> Command::Spawn() {
         cmdline += QuoteArgWin(arg);
     }
     
+    // Build environment block: merge current environment with overrides (if any)
     std::string env_block;
     if (!EnvVars.empty()) {
-        for (const auto& [key, value] : EnvVars) {
-            env_block += key + "=" + value + "\0";
+        // Gather current environment
+        LPCH env_strings = GetEnvironmentStringsA();
+        if (env_strings) {
+            // Copy all existing vars unless overridden (case-insensitive on Windows)
+            std::unordered_map<std::string, std::string> lower_over;
+            lower_over.reserve(EnvVars.size());
+            for (const auto& [k, v] : EnvVars) {
+                std::string lk = k; for (auto& c : lk) c = static_cast<char>(::CharLowerA(reinterpret_cast<LPSTR>(&c)));
+                lower_over.emplace(std::move(lk), v);
+            }
+            for (LPCSTR p = env_strings; *p; ) {
+                std::string entry = p;
+                size_t eq = entry.find('=');
+                if (eq != std::string::npos) {
+                    std::string key = entry.substr(0, eq);
+                    std::string lk = key; for (auto& c : lk) c = static_cast<char>(::CharLowerA(reinterpret_cast<LPSTR>(&c)));
+                    if (lower_over.find(lk) == lower_over.end()) {
+                        env_block += entry;
+                        env_block.push_back('\0');
+                    }
+                }
+                p += entry.size() + 1;
+            }
+            FreeEnvironmentStringsA(env_strings);
         }
-        env_block += "\0";
+        // Add/override with provided variables
+        for (const auto& [key, value] : EnvVars) {
+            env_block += key;
+            env_block += '=';
+            env_block += value;
+            env_block.push_back('\0');
+        }
+        env_block.push_back('\0');
     }
     
     BOOL success = CreateProcessA(
@@ -350,30 +383,64 @@ inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
 }
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    if (command.find('\\') != std::string::npos || command.find('/') != std::string::npos) {
-        return IsFileExecutable(command) || IsFileExecutable(command + ".exe");
+    auto has_sep = command.find('\\') != std::string::npos || command.find('/') != std::string::npos;
+
+    auto has_ext = [](const std::string& p) {
+        auto pos = p.find_last_of('.') ;
+        auto slash = p.find_last_of("/\\");
+        return pos != std::string::npos && (slash == std::string::npos || pos > slash);
+    };
+
+    auto is_exec_path = [&](const std::string& p){ return IsFileExecutable(p); };
+
+    // Collect PATHEXT list
+    std::vector<std::string> exts;
+    const char* pathext = getenv("PATHEXT");
+    if (pathext && *pathext) {
+        std::string s = pathext;
+        size_t b = 0, e = s.find(';');
+        while (true) {
+            exts.push_back(s.substr(b, e - b));
+            if (e == std::string::npos) break;
+            b = e + 1; e = s.find(';', b);
+        }
+    } else {
+        exts = {".COM", ".EXE", ".BAT", ".CMD"};
     }
-    
+
+    auto try_with_exts = [&](const std::string& base){
+        if (is_exec_path(base)) return true;
+        if (!has_ext(base)) {
+            for (const auto& ext : exts) {
+                std::string cand = base + ext;
+                if (is_exec_path(cand)) return true;
+            }
+        }
+        return false;
+    };
+
+    if (has_sep) {
+        return try_with_exts(command);
+    }
+
     const char* path_env = getenv("PATH");
     if (!path_env) return false;
-    
+
     std::string path_str(path_env);
     size_t start = 0;
     size_t end = path_str.find(';');
-    
-    while (start < path_str.length()) {
-        std::string dir = path_str.substr(start, end - start);
-        std::string full_path = dir + "\\" + command;
-        
-        if (IsFileExecutable(full_path) || IsFileExecutable(full_path + ".exe")) {
-            return true;
+
+    while (start <= path_str.length()) {
+        std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
+        if (!dir.empty()) {
+            std::string full_path = dir + "\\" + command;
+            if (try_with_exts(full_path)) return true;
         }
-        
         if (end == std::string::npos) break;
         start = end + 1;
         end = path_str.find(';', start);
     }
-    
+
     return false;
 }
 
@@ -385,6 +452,9 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     CommandResult result;
     int status = 0;
     rusage usage{};
+
+    // Start asynchronous pipe reader to avoid deadlocks while child runs
+    auto reader_future = std::async(std::launch::async, AsyncPipeReader::ReadPipes, StdoutFd, StderrFd);
 
     if (timeout) {
         while (true) {
@@ -412,10 +482,8 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
         wait4(ProcessId, &status, 0, &usage);
     }
 
-    auto end_time = std::chrono::steady_clock::now();
-    result.ExecutionTime = end_time - start_time;
-
-    auto [stdout_result, stderr_result] = AsyncPipeReader::ReadPipes(StdoutFd, StderrFd);
+    // Collect outputs (reader finishes when pipes close)
+    auto [stdout_result, stderr_result] = reader_future.get();
     result.Stdout = std::move(stdout_result);
     result.Stderr += stderr_result;
 
@@ -448,6 +516,9 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
             result.StopSignal = WSTOPSIG(status);
         }
     }
+
+    auto end_time = std::chrono::steady_clock::now();
+    result.ExecutionTime = end_time - start_time;
 
     return result;
 }
@@ -627,7 +698,7 @@ inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
     if (command.find('/') != std::string::npos) {
-        return IsFileExecutable(command);
+        return access(command.c_str(), X_OK) == 0;
     }
 
     const char* path_env = getenv("PATH");
@@ -637,14 +708,14 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
     size_t start = 0;
     size_t end = path_str.find(':');
 
-    while (start < path_str.length()) {
-        std::string dir = path_str.substr(start, end - start);
-        std::string full_path = dir + "/" + command;
-
-        if (IsFileExecutable(full_path)) {
-            return true;
+    while (start <= path_str.length()) {
+        std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
+        if (!dir.empty()) {
+            std::string full_path = dir + "/" + command;
+            if (access(full_path.c_str(), X_OK) == 0) {
+                return true;
+            }
         }
-
         if (end == std::string::npos) break;
         start = end + 1;
         end = path_str.find(':', start);
@@ -654,13 +725,12 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
 }
 
 inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
-    struct stat st{};
-    return stat(path.c_str(), &st) == 0 && st.st_mode & S_IXUSR;
+    return access(path.c_str(), X_OK) == 0;
 }
 
 #endif
 
-inline CommandResult Command::Status() {
+inline CommandResult Command::Execute() {
     if (const auto child = Spawn()) {
         return child->Wait(TimeoutDuration);
     }
