@@ -4,14 +4,12 @@
 
 /**
  * @brief CatalystCX - A cross-platform single-header C++ library for executing and managing external processes (or commands).
- * @file CatalystCX.hpp
+ * @file CatalystCX.cppm
  * @version 0.0.1
  * @author assembler-0
  */
 
-#pragma once
-#ifndef CATALYSTCX_HPP
-#define CATALYSTCX_HPP
+export module CatalystCX;
 
 #include <algorithm>
 #include <array>
@@ -50,7 +48,7 @@ namespace fs = std::filesystem;
 #define EXIT_FAIL_EC 127
 #endif
 
-struct CommandResult {
+export struct CommandResult {
     int ExitCode{};
     std::string Stdout;
     std::string Stderr;
@@ -81,29 +79,17 @@ struct CommandResult {
     } Usage{};
 };
 
-class Child {
+export class Child {
 public:
 #ifdef _WIN32
-    Child(HANDLE process, HANDLE thread, HANDLE stdout_handle, HANDLE stderr_handle)
-        : ProcessHandle(process), ThreadHandle(thread), StdoutHandle(stdout_handle), StderrHandle(stderr_handle), PipesClosed(false) {
-        ProcessId = GetProcessId(process);
-    }
-    
-    ~Child() {
-        if (ProcessHandle != INVALID_HANDLE_VALUE) CloseHandle(ProcessHandle);
-        if (ThreadHandle != INVALID_HANDLE_VALUE) CloseHandle(ThreadHandle);
-        if (!PipesClosed) {
-            if (StdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(StdoutHandle);
-            if (StderrHandle != INVALID_HANDLE_VALUE) CloseHandle(StderrHandle);
-        }
-    }
+    Child(HANDLE process, HANDLE thread, HANDLE stdout_handle, HANDLE stderr_handle);
+    ~Child();
 #else
-    Child(const pid_t pid, const int stdout_fd, const int stderr_fd)
-        : ProcessId(pid), StdoutFd(stdout_fd), StderrFd(stderr_fd) {}
+    Child(pid_t pid, int stdout_fd, int stderr_fd);
 #endif
 
     [[nodiscard]] CommandResult Wait(std::optional<std::chrono::duration<double>> timeout = std::nullopt) const;
-    [[nodiscard]] pid_t GetPid() const { return ProcessId; }
+    [[nodiscard]] pid_t GetPid() const;
 
 #ifdef _WIN32
     void Kill(int signal = 0) const;
@@ -125,34 +111,15 @@ private:
 #endif
 };
 
-class Command {
+export class Command {
 public:
-    explicit Command(std::string executable) : Executable(std::move(executable)) {}
+    explicit Command(std::string executable);
 
-    Command& Arg(std::string argument) {
-        Arguments.push_back(std::move(argument));
-        return *this;
-    }
-
-    Command& Args(const std::vector<std::string>& arguments) {
-        Arguments.insert(Arguments.end(), arguments.begin(), arguments.end());
-        return *this;
-    }
-
-    Command& WorkingDirectory(std::string path) {
-        WorkDir = std::move(path);
-        return *this;
-    }
-
-    Command& Environment(const std::string& key, const std::string& value) {
-        EnvVars[key] = value;
-        return *this;
-    }
-
-    Command& Timeout(std::chrono::duration<double> duration) {
-        TimeoutDuration = duration;
-        return *this;
-    }
+    Command& Arg(std::string argument);
+    Command& Args(const std::vector<std::string>& arguments);
+    Command& WorkingDirectory(std::string path);
+    Command& Environment(const std::string& key, const std::string& value);
+    Command& Timeout(std::chrono::duration<double> duration);
 
     [[nodiscard]] CommandResult Execute();
     [[nodiscard]] std::optional<Child> Spawn();
@@ -165,6 +132,20 @@ private:
     std::optional<std::chrono::duration<double>> TimeoutDuration;
 };
 
+export class ExecutionValidator {
+public:
+    static bool IsFileExecutable(const std::string& path);
+    static bool IsCommandExecutable(const std::string& command);
+    static bool CanExecuteCommand(const std::vector<std::string>& args);
+};
+
+export class SignalInfo {
+public:
+    static const char* GetSignalName(int signal);
+    static std::string GetProcessInfo(const CommandResult& result);
+};
+
+// This helper class is an implementation detail and not exported.
 class AsyncPipeReader {
     struct PipeData {
 #ifdef _WIN32
@@ -189,16 +170,59 @@ private:
 #endif
 };
 
-class ExecutionValidator {
-public:
-    static bool IsFileExecutable(const std::string& path);
-    static bool IsCommandExecutable(const std::string& command);
-    static bool CanExecuteCommand(const std::vector<std::string>& args);
-};
+// --- Child Implementation ---
+#ifdef _WIN32
+Child::Child(HANDLE process, HANDLE thread, HANDLE stdout_handle, HANDLE stderr_handle)
+    : ProcessHandle(process), ThreadHandle(thread), StdoutHandle(stdout_handle), StderrHandle(stderr_handle), PipesClosed(false) {
+    ProcessId = GetProcessId(process);
+}
+
+Child::~Child() {
+    if (ProcessHandle != INVALID_HANDLE_VALUE) CloseHandle(ProcessHandle);
+    if (ThreadHandle != INVALID_HANDLE_VALUE) CloseHandle(ThreadHandle);
+    if (!PipesClosed) {
+        if (StdoutHandle != INVALID_HANDLE_VALUE) CloseHandle(StdoutHandle);
+        if (StderrHandle != INVALID_HANDLE_VALUE) CloseHandle(StderrHandle);
+    }
+}
+#else
+Child::Child(const pid_t pid, const int stdout_fd, const int stderr_fd)
+    : ProcessId(pid), StdoutFd(stdout_fd), StderrFd(stderr_fd) {}
+#endif
+
+pid_t Child::GetPid() const { return ProcessId; }
+
+// --- Command Implementation ---
+Command::Command(std::string executable) : Executable(std::move(executable)) {}
+
+Command& Command::Arg(std::string argument) {
+    Arguments.push_back(std::move(argument));
+    return *this;
+}
+
+Command& Command::Args(const std::vector<std::string>& arguments) {
+    Arguments.insert(Arguments.end(), arguments.begin(), arguments.end());
+    return *this;
+}
+
+Command& Command::WorkingDirectory(std::string path) {
+    WorkDir = std::move(path);
+    return *this;
+}
+
+Command& Command::Environment(const std::string& key, const std::string& value) {
+    EnvVars[key] = value;
+    return *this;
+}
+
+Command& Command::Timeout(std::chrono::duration<double> duration) {
+    TimeoutDuration = duration;
+    return *this;
+}
 
 // Windows implementations
 #ifdef _WIN32
-inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
+CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
     CommandResult result;
 
@@ -243,11 +267,11 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     return result;
 }
 
-inline void Child::Kill(int) const {
+void Child::Kill(int) const {
     TerminateProcess(ProcessHandle, 1);
 }
 
-inline std::optional<Child> Command::Spawn() {
+std::optional<Child> Command::Spawn() {
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
@@ -257,7 +281,7 @@ inline std::optional<Child> Command::Spawn() {
     }
 
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    
+
     HANDLE stdout_read, stdout_write, stderr_read, stderr_write;
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
         return std::nullopt;
@@ -267,18 +291,18 @@ inline std::optional<Child> Command::Spawn() {
         CloseHandle(stdout_write);
         return std::nullopt;
     }
-    
+
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
-    
+
     STARTUPINFOA si = {sizeof(STARTUPINFOA)};
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = stdout_write;
     si.hStdError = stderr_write;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    
+
     PROCESS_INFORMATION pi = {};
-    
+
     auto QuoteArgWin = [](const std::string& s) -> std::string {
         bool need_quotes = s.find_first_of(" \t\"") != std::string::npos;
         if (!need_quotes) return s;
@@ -300,7 +324,7 @@ inline std::optional<Child> Command::Spawn() {
         cmdline += ' ';
         cmdline += QuoteArgWin(arg);
     }
-    
+
     // Build environment block: merge current environment with overrides (if any)
     std::string env_block;
     if (!EnvVars.empty()) {
@@ -340,7 +364,7 @@ inline std::optional<Child> Command::Spawn() {
         }
         env_block.push_back('\0');
     }
-    
+
     BOOL success = CreateProcessA(
         nullptr, const_cast<char*>(cmdline.c_str()),
         nullptr, nullptr, TRUE, 0,
@@ -348,25 +372,25 @@ inline std::optional<Child> Command::Spawn() {
         WorkDir ? WorkDir->c_str() : nullptr,
         &si, &pi
     );
-    
+
     CloseHandle(stdout_write);
     CloseHandle(stderr_write);
-    
+
     if (!success) {
         CloseHandle(stdout_read);
         CloseHandle(stderr_read);
         return std::nullopt;
     }
-    
+
     return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
 }
 
-inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
+std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
     PipeData stdout_data{stdout_handle, {}};
     PipeData stderr_data{stderr_handle, {}};
-    
+
     std::array<char, 8192> buffer;
-    
+
     while (!stdout_data.Finished || !stderr_data.Finished) {
         bool any_read = false;
         if (!stdout_data.Finished && ReadFromPipe(stdout_data, buffer)) {
@@ -374,87 +398,22 @@ inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE std
         } else if (!stdout_data.Finished) {
             stdout_data.Finished = true;
         }
-        
+
         if (!stderr_data.Finished && ReadFromPipe(stderr_data, buffer)) {
             any_read = true;
         } else if (!stderr_data.Finished) {
             stderr_data.Finished = true;
         }
-        
+
         if (!any_read && (!stdout_data.Finished || !stderr_data.Finished)) {
             Sleep(1);
         }
     }
-    
-    return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};emplace(std::move(lk), v);
-            }
-            for (LPCSTR p = env_strings; *p; ) {
-                std::string entry = p;
-                size_t eq = entry.find('=');
-                if (eq != std::string::npos) {
-                    std::string key = entry.substr(0, eq);
-                    std::string lk = key; for (auto& c : lk) c = static_cast<char>(::CharLowerA(reinterpret_cast<LPSTR>(&c)));
-                    if (lower_over.find(lk) == lower_over.end()) {
-                        env_block += entry;
-                        env_block.push_back('\0');
-                    }
-                }
-                p += entry.size() + 1;
-            }
-            FreeEnvironmentStringsA(env_strings);
-        }
-        // Add/override with provided variables
-        for (const auto& [key, value] : EnvVars) {
-            env_block += key;
-            env_block += '=';
-            env_block += value;
-            env_block.push_back('\0');
-        }
-        env_block.push_back('\0');
-    }
-    
-    BOOL success = CreateProcessA(
-        nullptr, const_cast<char*>(cmdline.c_str()),
-        nullptr, nullptr, TRUE, 0,
-        env_block.empty() ? nullptr : const_cast<char*>(env_block.c_str()),
-        WorkDir ? WorkDir->c_str() : nullptr,
-        &si, &pi
-    );
-    
-    CloseHandle(stdout_write);
-    CloseHandle(stderr_write);
-    
-    if (!success) {
-        CloseHandle(stdout_read);
-        CloseHandle(stderr_read);
-        return std::nullopt;
-    }
-    
-    return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
-}
 
-inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
-    PipeData stdout_data{stdout_handle, {}};
-    PipeData stderr_data{stderr_handle, {}};
-    
-    std::array<char, 8192> buffer;
-    
-    while (!stdout_data.Finished || !stderr_data.Finished) {
-        if (!stdout_data.Finished && !ReadFromPipe(stdout_data, buffer)) {
-            stdout_data.Finished = true;
-        }
-        if (!stderr_data.Finished && !ReadFromPipe(stderr_data, buffer)) {
-            stderr_data.Finished = true;
-        }
-        if (!stdout_data.Finished || !stderr_data.Finished) {
-            Sleep(10);
-        }
-    }
-    
     return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
 }
 
-inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
+bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
     DWORD bytes_read;
     if (ReadFile(pipe_data.Handle, buffer.data(), buffer.size(), &bytes_read, nullptr)) {
         if (bytes_read > 0) {
@@ -465,12 +424,12 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 
     return false;
 }
 
-inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
+bool ExecutionValidator::IsFileExecutable(const std::string& path) {
     DWORD attrs = GetFileAttributesA(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
+bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
     auto has_sep = command.find('\\') != std::string::npos || command.find('/') != std::string::npos;
 
     auto has_ext = [](const std::string& p) {
@@ -493,7 +452,7 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
             b = e + 1; e = s.find(';', b);
         }
     } else {
-        exts = {".COM", ".EXE", ".BAT", ".CMD"};
+        exts = { ".COM", ".EXE", ".BAT", ".CMD" };
     }
 
     auto try_with_exts = [&](const std::string& base){
@@ -534,7 +493,7 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
 
 #else
 // Unix implementations
-inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
+CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
 
     CommandResult result;
@@ -561,11 +520,10 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        
+
         // Check if we timed out
         if (std::chrono::steady_clock::now() >= timeout_time) {
-            const int wait_result = waitpid(ProcessId, &status, WNOHANG);
-            if (wait_result == 0) { // Still running
+            if (const int wait_result = waitpid(ProcessId, &status, WNOHANG); wait_result == 0) { // Still running
                 Kill();
                 result.TimedOut = true;
                 wait4(ProcessId, &status, 0, &usage);
@@ -618,11 +576,11 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     return result;
 }
 
-inline void Child::Kill(const int signal) const {
+void Child::Kill(const int signal) const {
     kill(ProcessId, signal);
 }
 
-inline std::optional<Child> Command::Spawn() {
+std::optional<Child> Command::Spawn() {
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
@@ -739,7 +697,7 @@ inline std::optional<Child> Command::Spawn() {
 
 
 // Implementation of AsyncPipeReader
-inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int stdout_fd, const int stderr_fd) {
+std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int stdout_fd, const int stderr_fd) {
     fcntl(stdout_fd, F_SETFL, O_NONBLOCK);
     fcntl(stderr_fd, F_SETFL, O_NONBLOCK);
 
@@ -780,7 +738,7 @@ inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int 
     return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
 }
 
-inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
+bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
     const ssize_t bytes_read = read(pipe_data.Fd, buffer.data(), buffer.size());
     if (bytes_read > 0) {
         pipe_data.Buffer.append(buffer.data(), bytes_read);
@@ -789,11 +747,11 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 
     return bytes_read != 0;
 }
 
-inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
+bool AsyncPipeReader::IsPipeOpen(const int fd) {
     return fcntl(fd, F_GETFD) != -1;
 }
 
-inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
+bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
     if (command.find('/') != std::string::npos) {
         return access(command.c_str(), X_OK) == 0;
     }
@@ -821,13 +779,13 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
     return false;
 }
 
-inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
+bool ExecutionValidator::IsFileExecutable(const std::string& path) {
     return access(path.c_str(), X_OK) == 0;
 }
 
 #endif
 
-inline CommandResult Command::Execute() {
+CommandResult Command::Execute() {
     if (const auto child = Spawn()) {
         return child->Wait(TimeoutDuration);
     }
@@ -837,55 +795,52 @@ inline CommandResult Command::Execute() {
     return result;
 }
 
-inline bool ExecutionValidator::CanExecuteCommand(const std::vector<std::string>& args) {
+bool ExecutionValidator::CanExecuteCommand(const std::vector<std::string>& args) {
     return !args.empty() && IsCommandExecutable(args[0]);
 }
 
-class SignalInfo {
-public:
-    static const char* GetSignalName(const int signal) {
+const char* SignalInfo::GetSignalName(const int signal) {
 #ifndef _WIN32
-        switch (signal) {
-            case SIGTERM: return "SIGTERM";
-            case SIGKILL: return "SIGKILL";
-            case SIGINT: return "SIGINT";
-            case SIGQUIT: return "SIGQUIT";
-            case SIGABRT: return "SIGABRT";
-            case SIGFPE: return "SIGFPE";
-            case SIGILL: return "SIGILL";
-            case SIGSEGV: return "SIGSEGV";
-            case SIGBUS: return "SIGBUS";
-            case SIGPIPE: return "SIGPIPE";
-            case SIGALRM: return "SIGALRM";
-            case SIGUSR1: return "SIGUSR1";
-            case SIGUSR2: return "SIGUSR2";
-            case SIGCHLD: return "SIGCHLD";
-            case SIGCONT: return "SIGCONT";
-            case SIGSTOP: return "SIGSTOP";
-            case SIGTSTP: return "SIGTSTP";
-            default: return "UNKNOWN";
-        }
+    switch (signal) {
+        case SIGTERM: return "SIGTERM";
+        case SIGKILL: return "SIGKILL";
+        case SIGINT: return "SIGINT";
+        case SIGQUIT: return "SIGQUIT";
+        case SIGABRT: return "SIGABRT";
+        case SIGFPE: return "SIGFPE";
+        case SIGILL: return "SIGILL";
+        case SIGSEGV: return "SIGSEGV";
+        case SIGBUS: return "SIGBUS";
+        case SIGPIPE: return "SIGPIPE";
+        case SIGALRM: return "SIGALRM";
+        case SIGUSR1: return "SIGUSR1";
+        case SIGUSR2: return "SIGUSR2";
+        case SIGCHLD: return "SIGCHLD";
+        case SIGCONT: return "SIGCONT";
+        case SIGSTOP: return "SIGSTOP";
+        case SIGTSTP: return "SIGTSTP";
+        default: return "UNKNOWN";
+    }
 #else
-        return "N/A";
+    (void)signal;
+    return "N/A";
 #endif
-    }
-    
-    static std::string GetProcessInfo(const CommandResult& result) {
-        std::ostringstream info;
-        if (result.KilledBySignal) {
-            info << "Killed by signal " << result.TerminatingSignal 
-                 << " (" << GetSignalName(result.TerminatingSignal) << ")";
-            if (result.CoreDumped) info << " [core dumped]";
-        } else if (result.Stopped) {
-            info << "Stopped by signal " << result.StopSignal
-                 << " (" << GetSignalName(result.StopSignal) << ")";
-        } else if (result.TimedOut) {
-            info << "Process timed out";
-        } else {
-            info << "Exited normally with code " << result.ExitCode;
-        }
-        return info.str();
-    }
-};
+}
 
-#endif
+std::string SignalInfo::GetProcessInfo(const CommandResult& result) {
+    std::ostringstream info;
+    if (result.KilledBySignal) {
+        info << "Killed by signal " << result.TerminatingSignal
+             << " (" << GetSignalName(result.TerminatingSignal) << ")";
+        if (result.CoreDumped) info << " [core dumped]";
+    } else if (result.Stopped) {
+        info << "Stopped by signal " << result.StopSignal
+             << " (" << GetSignalName(result.StopSignal) << ")";
+    } else if (result.TimedOut) {
+        info << "Process timed out";
+    } else {
+        info << "Exited normally with code " << result.ExitCode;
+    }
+    return info.str();
+}
+
