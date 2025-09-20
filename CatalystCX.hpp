@@ -25,15 +25,15 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <csignal>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
 #include <io.h>
 #include <fcntl.h>
-using pid_t = DWORD;
+#include <processthreadsapi.h>
 #else
-#include <csignal>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/resource.h>
@@ -363,96 +363,26 @@ inline std::optional<Child> Command::Spawn() {
 }
 
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
-    PipeData stdout_data{stdout_handle, {}};
-    PipeData stderr_data{stderr_handle, {}};
-    
-    std::array<char, 8192> buffer;
-    
-    while (!stdout_data.Finished || !stderr_data.Finished) {
-        bool any_read = false;
-        if (!stdout_data.Finished && ReadFromPipe(stdout_data, buffer)) {
-            any_read = true;
-        } else if (!stdout_data.Finished) {
-            stdout_data.Finished = true;
-        }
-        
-        if (!stderr_data.Finished && ReadFromPipe(stderr_data, buffer)) {
-            any_read = true;
-        } else if (!stderr_data.Finished) {
-            stderr_data.Finished = true;
-        }
-        
-        if (!any_read && (!stdout_data.Finished || !stderr_data.Finished)) {
-            Sleep(1);
-        }
-    }
-    
-    return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};emplace(std::move(lk), v);
+    auto read_all = [](HANDLE h) -> std::string {
+        std::string acc;
+        std::array<char, 8192> buf{};
+        DWORD n = 0;
+        for (;;) {
+            if (!ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &n, nullptr)) {
+                const DWORD err = GetLastError();
+                if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) break;
+                // Transient: small backoff
+                Sleep(1);
+                continue;
             }
-            for (LPCSTR p = env_strings; *p; ) {
-                std::string entry = p;
-                size_t eq = entry.find('=');
-                if (eq != std::string::npos) {
-                    std::string key = entry.substr(0, eq);
-                    std::string lk = key; for (auto& c : lk) c = static_cast<char>(::CharLowerA(reinterpret_cast<LPSTR>(&c)));
-                    if (lower_over.find(lk) == lower_over.end()) {
-                        env_block += entry;
-                        env_block.push_back('\0');
-                    }
-                }
-                p += entry.size() + 1;
-            }
-            FreeEnvironmentStringsA(env_strings);
+            if (n == 0) break;
+            acc.append(buf.data(), n);
         }
-        // Add/override with provided variables
-        for (const auto& [key, value] : EnvVars) {
-            env_block += key;
-            env_block += '=';
-            env_block += value;
-            env_block.push_back('\0');
-        }
-        env_block.push_back('\0');
-    }
-    
-    BOOL success = CreateProcessA(
-        nullptr, const_cast<char*>(cmdline.c_str()),
-        nullptr, nullptr, TRUE, 0,
-        env_block.empty() ? nullptr : const_cast<char*>(env_block.c_str()),
-        WorkDir ? WorkDir->c_str() : nullptr,
-        &si, &pi
-    );
-    
-    CloseHandle(stdout_write);
-    CloseHandle(stderr_write);
-    
-    if (!success) {
-        CloseHandle(stdout_read);
-        CloseHandle(stderr_read);
-        return std::nullopt;
-    }
-    
-    return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
-}
-
-inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
-    PipeData stdout_data{stdout_handle, {}};
-    PipeData stderr_data{stderr_handle, {}};
-    
-    std::array<char, 8192> buffer;
-    
-    while (!stdout_data.Finished || !stderr_data.Finished) {
-        if (!stdout_data.Finished && !ReadFromPipe(stdout_data, buffer)) {
-            stdout_data.Finished = true;
-        }
-        if (!stderr_data.Finished && !ReadFromPipe(stderr_data, buffer)) {
-            stderr_data.Finished = true;
-        }
-        if (!stdout_data.Finished || !stderr_data.Finished) {
-            Sleep(10);
-        }
-    }
-    
-    return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
+        return acc;
+    };
+    auto f_out = std::async(std::launch::async, read_all, stdout_handle);
+    auto f_err = std::async(std::launch::async, read_all, stderr_handle);
+    return {f_out.get(), f_err.get()};
 }
 
 inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
@@ -472,68 +402,13 @@ inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
 }
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    auto has_sep = command.find('\\') != std::string::npos || command.find('/') != std::string::npos;
-
-    auto has_ext = [](const std::string& p) {
-        auto pos = p.find_last_of('.') ;
-        auto slash = p.find_last_of("/\\");
-        return pos != std::string::npos && (slash == std::string::npos || pos > slash);
-    };
-
-    auto is_exec_path = [&](const std::string& p){ return IsFileExecutable(p); };
-
-    // Collect PATHEXT list
-    std::vector<std::string> exts;
-    const char* pathext = getenv("PATHEXT");
-    if (pathext && *pathext) {
-        std::string s = pathext;
-        size_t b = 0, e = s.find(';');
-        while (true) {
-            exts.push_back(s.substr(b, e - b));
-            if (e == std::string::npos) break;
-            b = e + 1; e = s.find(';', b);
-        }
-    } else {
-        exts = {".COM", ".EXE", ".BAT", ".CMD"};
-    }
-
-    auto try_with_exts = [&](const std::string& base){
-        if (is_exec_path(base)) return true;
-        if (!has_ext(base)) {
-            for (const auto& ext : exts) {
-                std::string cand = base + ext;
-                if (is_exec_path(cand)) return true;
-            }
-        }
-        return false;
-    };
-
-    if (has_sep) {
-        return try_with_exts(command);
-    }
-
-    const char* path_env = getenv("PATH");
-    if (!path_env) return false;
-
-    std::string path_str(path_env);
-    size_t start = 0;
-    size_t end = path_str.find(';');
-
-    while (start <= path_str.length()) {
-        std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
-        if (!dir.empty()) {
-            std::string full_path = dir + "\\" + command;
-            if (try_with_exts(full_path)) return true;
-        }
-        if (end == std::string::npos) break;
-        start = end + 1;
-        end = path_str.find(';', start);
-    }
-
-    return false;
+    std::wstring wcommand(command.begin(), command.end());
+    DWORD needed = SearchPathW(nullptr, wcommand.c_str(), L".exe", 0, nullptr, nullptr);
+    return needed > 0;
 }
 
 #else
+
 // Unix implementations
 inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
@@ -565,8 +440,7 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
         
         // Check if we timed out
         if (std::chrono::steady_clock::now() >= timeout_time) {
-            const int wait_result = waitpid(ProcessId, &status, WNOHANG);
-            if (wait_result == 0) { // Still running
+            if (const int wait_result = waitpid(ProcessId, &status, WNOHANG); wait_result == 0) { // Still running
                 Kill();
                 result.TimedOut = true;
                 wait4(ProcessId, &status, 0, &usage);
@@ -598,18 +472,18 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
 
     // Enhanced process termination analysis
     if (!result.TimedOut) {
-        if (WIFEXITED(status)) {
-            result.ExitCode = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
+        if (__WIFEXITED(status)) {
+            result.ExitCode = __WEXITSTATUS(status);
+        } else if (__WIFSIGNALED(status)) {
             result.KilledBySignal = true;
-            result.TerminatingSignal = WTERMSIG(status);
+            result.TerminatingSignal = __WTERMSIG(status);
             result.ExitCode = 128 + result.TerminatingSignal;
 #ifdef WCOREDUMP
-            result.CoreDumped = WCOREDUMP(status);
+            result.CoreDumped = __WCOREDUMP(status);
 #endif
-        } else if (WIFSTOPPED(status)) {
+        } else if (__WIFSTOPPED(status)) {
             result.Stopped = true;
-            result.StopSignal = WSTOPSIG(status);
+            result.StopSignal = __WSTOPSIG(status);
         }
     }
 
@@ -738,7 +612,6 @@ inline std::optional<Child> Command::Spawn() {
     return Child(pid, stdout_pipe[0], stderr_pipe[0]);
 }
 
-
 // Implementation of AsyncPipeReader
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int stdout_fd, const int stderr_fd) {
     fcntl(stdout_fd, F_SETFL, O_NONBLOCK);
@@ -795,9 +668,7 @@ inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
 }
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    if (command.find('/') != std::string::npos) {
-        return access(command.c_str(), X_OK) == 0;
-    }
+    if (command.find('/') != std::string::npos) return access(command.c_str(), X_OK) == 0;
 
     const char* path_env = getenv("PATH");
     if (!path_env) return false;
@@ -810,9 +681,8 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
         if (std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
             !dir.empty()) {
             std::string full_path = dir + "/" + command;
-            if (access(full_path.c_str(), X_OK) == 0) {
-                return true;
-            }
+            if (access(full_path.c_str(), X_OK) == 0) return true;
+
         }
         if (end == std::string::npos) break;
         start = end + 1;
@@ -867,6 +737,7 @@ public:
             default: return "UNKNOWN";
         }
 #else
+        static_cast<void>(signal)
         return "N/A";
 #endif
     }
