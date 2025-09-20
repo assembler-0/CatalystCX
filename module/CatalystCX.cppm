@@ -230,7 +230,7 @@ Command& Command::Timeout(std::chrono::duration<double> duration) {
 
 // Windows implementations
 #ifdef _WIN32
-CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
+inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
     CommandResult result;
 
@@ -260,7 +260,7 @@ CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) 
         result.Usage.PageFaultCount = pmc.PageFaultCount;
     }
 
-    // Gather output after process has exited (pipes should be closed by child)
+    // Gather output after process has exited (child should close pipes)
     auto [stdout_result, stderr_result] = reader_future.get();
     result.Stdout = std::move(stdout_result);
     result.Stderr = std::move(stderr_result);
@@ -275,11 +275,11 @@ CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) 
     return result;
 }
 
-void Child::Kill(int) const {
+inline void Child::Kill(int) const {
     TerminateProcess(ProcessHandle, 1);
 }
 
-std::optional<Child> Command::Spawn() {
+inline std::optional<Child> Command::Spawn() {
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
@@ -393,7 +393,7 @@ std::optional<Child> Command::Spawn() {
     return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
 }
 
-std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
+inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
     PipeData stdout_data{stdout_handle, {}};
     PipeData stderr_data{stderr_handle, {}};
 
@@ -401,27 +401,30 @@ std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_han
 
     while (!stdout_data.Finished || !stderr_data.Finished) {
         bool any_read = false;
-        if (!stdout_data.Finished && ReadFromPipe(stdout_data, buffer)) {
-            any_read = true;
-        } else if (!stdout_data.Finished) {
-            stdout_data.Finished = true;
+        if (!stdout_data.Finished) {
+            if (ReadFromPipe(stdout_data, buffer)) {
+                any_read = true;
+            } else {
+                stdout_data.Finished = true;
+            }
         }
 
-        if (!stderr_data.Finished && ReadFromPipe(stderr_data, buffer)) {
-            any_read = true;
-        } else if (!stderr_data.Finished) {
-            stderr_data.Finished = true;
+        if (!stderr_data.Finished) {
+            if (ReadFromPipe(stderr_data, buffer)) {
+                any_read = true;
+            } else {
+                stderr_data.Finished = true;
+            }
         }
 
         if (!any_read && (!stdout_data.Finished || !stderr_data.Finished)) {
             Sleep(1);
         }
     }
-
     return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
 }
 
-bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
+inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
     DWORD bytes_read;
     if (ReadFile(pipe_data.Handle, buffer.data(), buffer.size(), &bytes_read, nullptr)) {
         if (bytes_read > 0) {
@@ -432,12 +435,12 @@ bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& 
     return false;
 }
 
-bool ExecutionValidator::IsFileExecutable(const std::string& path) {
+inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
     DWORD attrs = GetFileAttributesA(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
+inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
     auto has_sep = command.find('\\') != std::string::npos || command.find('/') != std::string::npos;
 
     auto has_ext = [](const std::string& p) {
@@ -460,7 +463,7 @@ bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
             b = e + 1; e = s.find(';', b);
         }
     } else {
-        exts = { ".COM", ".EXE", ".BAT", ".CMD" };
+        exts = {".COM", ".EXE", ".BAT", ".CMD"};
     }
 
     auto try_with_exts = [&](const std::string& base){
@@ -500,6 +503,7 @@ bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
 }
 
 #else
+
 // Unix implementations
 CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     auto start_time = std::chrono::steady_clock::now();
