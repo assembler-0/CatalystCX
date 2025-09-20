@@ -1,25 +1,21 @@
 cmake_minimum_required(VERSION 3.10)
-project(CatalystCX VERSION 0.0.1)
+project(CatalystCX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g0")
+# Compiler flags
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
-add_executable(CatalystCX
-        CatalystCX.cpp
-)
+# Test suite executable
+add_executable(cxtest Evaluate.cpp)
 
-# --- Run Target ---
-add_custom_target(run
-    COMMAND ${CMAKE_COMMAND} -E env "PATH=$ENV{PATH}" ./CatalystCX
-    DEPENDS CatalystCX
+# Custom target to run tests
+add_custom_target(test
+    COMMAND cxtest
+    DEPENDS cxtest
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# --- Install Target ---
-include(GNUInstallDirs)
-
-install(FILES CatalystCX.hpp
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+# Install header
+install(FILES CatalystCX.hpp DESTINATION include)

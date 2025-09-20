@@ -25,6 +25,11 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef __APPLE__
+#include <spawn.h>
+extern char **environ;
+#endif
+
 namespace fs = std::filesystem;
 
 // A struct to hold the result of a command execution
@@ -34,12 +39,23 @@ struct CommandResult {
     std::string Stderr;
     std::chrono::duration<double> ExecutionTime{};
     bool TimedOut = false;
+    
+    // Process termination info
+    bool KilledBySignal = false;
+    int TerminatingSignal = 0;
+    bool CoreDumped = false;
+    bool Stopped = false;
+    int StopSignal = 0;
 
 #ifdef __linux__
     struct ResourceUsage {
         long UserCpuTime; // in microseconds
         long SystemCpuTime; // in microseconds
         long MaxResidentSetSize; // in kilobytes
+        long MinorPageFaults;
+        long MajorPageFaults;
+        long VoluntaryContextSwitches;
+        long InvoluntaryContextSwitches;
     } Usage{};
 #endif
 };
@@ -182,10 +198,27 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     result.Usage.UserCpuTime = usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec;
     result.Usage.SystemCpuTime = usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec;
     result.Usage.MaxResidentSetSize = usage.ru_maxrss;
+    result.Usage.MinorPageFaults = usage.ru_minflt;
+    result.Usage.MajorPageFaults = usage.ru_majflt;
+    result.Usage.VoluntaryContextSwitches = usage.ru_nvcsw;
+    result.Usage.InvoluntaryContextSwitches = usage.ru_nivcsw;
 #endif
 
+    // Enhanced process termination analysis
     if (!result.TimedOut) {
-        result.ExitCode = WEXITSTATUS(status);
+        if (WIFEXITED(status)) {
+            result.ExitCode = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            result.KilledBySignal = true;
+            result.TerminatingSignal = WTERMSIG(status);
+            result.ExitCode = 128 + result.TerminatingSignal;
+#ifdef WCOREDUMP
+            result.CoreDumped = WCOREDUMP(status);
+#endif
+        } else if (WIFSTOPPED(status)) {
+            result.Stopped = true;
+            result.StopSignal = WSTOPSIG(status);
+        }
     }
 
     return result;
@@ -220,32 +253,86 @@ inline std::optional<Child> Command::Spawn() {
         return std::nullopt;
     }
 
+#ifdef __APPLE__
+    posix_spawn_file_actions_t file_actions;
+    posix_spawnattr_t attr;
+    
+    if (posix_spawn_file_actions_init(&file_actions) != 0 ||
+        posix_spawnattr_init(&attr) != 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return std::nullopt;
+    }
+    
+    posix_spawn_file_actions_adddup2(&file_actions, stdout_pipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&file_actions, stderr_pipe[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&file_actions, stdout_pipe[0]);
+    posix_spawn_file_actions_addclose(&file_actions, stdout_pipe[1]);
+    posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[0]);
+    posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[1]);
+    
+    if (WorkDir) {
+        posix_spawn_file_actions_addchdir_np(&file_actions, WorkDir->c_str());
+    }
+    
+    std::vector<char*> argv, envp;
+    argv.reserve(args_vec.size() + 1);
+    for (const auto& s : args_vec) {
+        argv.push_back(const_cast<char*>(s.c_str()));
+    }
+    argv.push_back(nullptr);
+    
+    std::vector<std::string> env_strings;
+    if (!EnvVars.empty()) {
+        for (char** env = environ; *env; ++env) {
+            std::string env_str(*env);
+            std::string key = env_str.substr(0, env_str.find('='));
+            if (EnvVars.find(key) == EnvVars.end()) {
+                env_strings.push_back(env_str);
+            }
+        }
+        for (const auto& [key, value] : EnvVars) {
+            env_strings.push_back(key + "=" + value);
+        }
+        for (const auto& s : env_strings) {
+            envp.push_back(const_cast<char*>(s.c_str()));
+        }
+        envp.push_back(nullptr);
+    }
+    
+    pid_t pid;
+    int result = posix_spawn(&pid, argv[0], &file_actions, &attr, 
+                            argv.data(), envp.empty() ? environ : envp.data());
+    
+    posix_spawn_file_actions_destroy(&file_actions);
+    posix_spawnattr_destroy(&attr);
+    
+    if (result != 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return std::nullopt;
+    }
+#else
     const pid_t pid = fork();
     if (pid == -1) {
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
         return std::nullopt;
     }
 
-    if (pid == 0) { // Child process
-        if (WorkDir) {
-            if (chdir(WorkDir->c_str()) != 0) {
-                _exit(127);
-            }
+    if (pid == 0) {
+        if (WorkDir && chdir(WorkDir->c_str()) != 0) {
+            _exit(127);
         }
 
-        for(const auto &[fst, snd] : EnvVars) {
-            setenv(fst.c_str(), snd.c_str(), 1);
+        for(const auto &[key, value] : EnvVars) {
+            setenv(key.c_str(), value.c_str(), 1);
         }
 
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
 
         std::vector<char*> argv;
         argv.reserve(args_vec.size() + 1);
@@ -255,10 +342,10 @@ inline std::optional<Child> Command::Spawn() {
         argv.push_back(nullptr);
 
         execvp(argv[0], argv.data());
-        _exit(127); // exec failed
+        _exit(127);
     }
+#endif
 
-    // Parent process
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
@@ -314,78 +401,92 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 
         pipe_data.Buffer.append(buffer.data(), bytes_read);
         return true;
     }
-    return bytes_read == 0; // EOF
+    return bytes_read != 0;
 }
 
 inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
     return fcntl(fd, F_GETFD) != -1;
 }
 
-
-// Implementation of ExecutionValidator
 inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
-    char resolved_path[PATH_MAX];
-    if (realpath(path.c_str(), resolved_path) == nullptr) {
-        return false;
-    }
-
-    struct stat sb{};
-    if (stat(resolved_path, &sb) != 0) {
-        return false;
-    }
-
-    if (!S_ISREG(sb.st_mode)) {
-        return false;
-    }
-
-    return access(resolved_path, X_OK) == 0;
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && st.st_mode & S_IXUSR;
 }
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    if (command.empty() || command.find('\0') != std::string::npos) {
-        return false;
-    }
-
-    if (command.find("../") != std::string::npos) {
-        return false;
-    }
-
     if (command.find('/') != std::string::npos) {
         return IsFileExecutable(command);
     }
-
-    const char* path_env = std::getenv("PATH");
-    if (!path_env) {
-        return false;
-    }
-
-    const std::string path_str(path_env);
-    std::stringstream ss(path_str);
-    std::string dir;
-
-    while (std::getline(ss, dir, ':')) {
-        if (dir.empty() || dir.find("..") != std::string::npos) {
-            continue;
-        }
-
+    
+    const char* path_env = getenv("PATH");
+    if (!path_env) return false;
+    
+    std::string path_str(path_env);
+    size_t start = 0;
+    size_t end = path_str.find(':');
+    
+    while (start < path_str.length()) {
+        std::string dir = path_str.substr(start, end - start);
         std::string full_path = dir + "/" + command;
-
-        if (full_path.length() >= PATH_MAX) {
-            continue;
-        }
-
+        
         if (IsFileExecutable(full_path)) {
             return true;
         }
+        
+        if (end == std::string::npos) break;
+        start = end + 1;
+        end = path_str.find(':', start);
     }
-
+    
     return false;
 }
 
 inline bool ExecutionValidator::CanExecuteCommand(const std::vector<std::string>& args) {
-    if (args.empty()) return false;
-    return IsCommandExecutable(args[0]);
+    return !args.empty() && IsCommandExecutable(args[0]);
 }
 
+// Signal name lookup utility
+class SignalInfo {
+public:
+    static const char* GetSignalName(const int signal) {
+        switch (signal) {
+            case SIGTERM: return "SIGTERM";
+            case SIGKILL: return "SIGKILL";
+            case SIGINT: return "SIGINT";
+            case SIGQUIT: return "SIGQUIT";
+            case SIGABRT: return "SIGABRT";
+            case SIGFPE: return "SIGFPE";
+            case SIGILL: return "SIGILL";
+            case SIGSEGV: return "SIGSEGV";
+            case SIGBUS: return "SIGBUS";
+            case SIGPIPE: return "SIGPIPE";
+            case SIGALRM: return "SIGALRM";
+            case SIGUSR1: return "SIGUSR1";
+            case SIGUSR2: return "SIGUSR2";
+            case SIGCHLD: return "SIGCHLD";
+            case SIGCONT: return "SIGCONT";
+            case SIGSTOP: return "SIGSTOP";
+            case SIGTSTP: return "SIGTSTP";
+            default: return "UNKNOWN";
+        }
+    }
+    
+    static std::string GetProcessInfo(const CommandResult& result) {
+        std::ostringstream info;
+        if (result.KilledBySignal) {
+            info << "Killed by signal " << result.TerminatingSignal 
+                 << " (" << GetSignalName(result.TerminatingSignal) << ")";
+            if (result.CoreDumped) info << " [core dumped]";
+        } else if (result.Stopped) {
+            info << "Stopped by signal " << result.StopSignal
+                 << " (" << GetSignalName(result.StopSignal) << ")";
+        } else if (result.TimedOut) {
+            info << "Process timed out";
+        } else {
+            info << "Exited normally with code " << result.ExitCode;
+        }
+        return info.str();
+    }
+};
 
-#endif // CATALYSTCX_HPP
+#endif
