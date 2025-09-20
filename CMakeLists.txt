@@ -19,7 +19,7 @@ add_custom_target(test
 
 add_compile_definitions(
         WCOREDUMP
-        EXIT_FAIL_EC=127
+        EXIT_FAIL_EC=255
 )
 
 # Install header

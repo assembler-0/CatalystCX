@@ -363,34 +363,26 @@ inline std::optional<Child> Command::Spawn() {
 }
 
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
-    PipeData stdout_data{stdout_handle, {}};
-    PipeData stderr_data{stderr_handle, {}};
-
-    std::array<char, 8192> buffer;
-
-    while (!stdout_data.Finished || !stderr_data.Finished) {
-        bool any_read = false;
-        if (!stdout_data.Finished) {
-            if (ReadFromPipe(stdout_data, buffer)) {
-                any_read = true;
-            } else {
-                stdout_data.Finished = true;
+    auto read_all = [](HANDLE h) -> std::string {
+        std::string acc;
+        std::array<char, 8192> buf{};
+        DWORD n = 0;
+        for (;;) {
+            if (!ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &n, nullptr)) {
+                const DWORD err = GetLastError();
+                if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) break;
+                // Transient: small backoff
+                Sleep(1);
+                continue;
             }
+            if (n == 0) break;
+            acc.append(buf.data(), n);
         }
-
-        if (!stderr_data.Finished) {
-            if (ReadFromPipe(stderr_data, buffer)) {
-                any_read = true;
-            } else {
-                stderr_data.Finished = true;
-            }
-        }
-
-        if (!any_read && (!stdout_data.Finished || !stderr_data.Finished)) {
-            Sleep(1);
-        }
-    }
-    return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
+        return acc;
+    };
+    auto f_out = std::async(std::launch::async, read_all, stdout_handle);
+    auto f_err = std::async(std::launch::async, read_all, stderr_handle);
+    return {f_out.get(), f_err.get()};
 }
 
 inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
@@ -411,10 +403,8 @@ inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
     std::wstring wcommand(command.begin(), command.end());
-    wchar_t buffer[MAX_PATH];
-    wchar_t* file_part;
-    DWORD result = SearchPathW(nullptr, wcommand.c_str(), L".exe", MAX_PATH, buffer, &file_part);
-    return result > 0 && result < MAX_PATH;
+    DWORD needed = SearchPathW(nullptr, wcommand.c_str(), L".exe", 0, nullptr, nullptr);
+    return needed > 0;
 }
 
 #else
@@ -482,18 +472,18 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
 
     // Enhanced process termination analysis
     if (!result.TimedOut) {
-        if (WIFEXITED(status)) {
-            result.ExitCode = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
+        if (__WIFEXITED(status)) {
+            result.ExitCode = __WEXITSTATUS(status);
+        } else if (__WIFSIGNALED(status)) {
             result.KilledBySignal = true;
-            result.TerminatingSignal = WTERMSIG(status);
+            result.TerminatingSignal = __WTERMSIG(status);
             result.ExitCode = 128 + result.TerminatingSignal;
 #ifdef WCOREDUMP
-            result.CoreDumped = WCOREDUMP(status);
+            result.CoreDumped = __WCOREDUMP(status);
 #endif
-        } else if (WIFSTOPPED(status)) {
+        } else if (__WIFSTOPPED(status)) {
             result.Stopped = true;
-            result.StopSignal = WSTOPSIG(status);
+            result.StopSignal = __WSTOPSIG(status);
         }
     }
 
@@ -622,7 +612,6 @@ inline std::optional<Child> Command::Spawn() {
     return Child(pid, stdout_pipe[0], stderr_pipe[0]);
 }
 
-
 // Implementation of AsyncPipeReader
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int stdout_fd, const int stderr_fd) {
     fcntl(stdout_fd, F_SETFL, O_NONBLOCK);
@@ -679,9 +668,7 @@ inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
 }
 
 inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    if (command.find('/') != std::string::npos) {
-        return access(command.c_str(), X_OK) == 0;
-    }
+    if (command.find('/') != std::string::npos) return access(command.c_str(), X_OK) == 0;
 
     const char* path_env = getenv("PATH");
     if (!path_env) return false;
@@ -694,9 +681,8 @@ inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) 
         if (std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
             !dir.empty()) {
             std::string full_path = dir + "/" + command;
-            if (access(full_path.c_str(), X_OK) == 0) {
-                return true;
-            }
+            if (access(full_path.c_str(), X_OK) == 0) return true;
+
         }
         if (end == std::string::npos) break;
         start = end + 1;
@@ -751,6 +737,7 @@ public:
             default: return "UNKNOWN";
         }
 #else
+        static_cast<void>(signal)
         return "N/A";
 #endif
     }
