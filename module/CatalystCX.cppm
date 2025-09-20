@@ -3,13 +3,15 @@
 // Licensed under GPL-3.0-or-later
 
 /**
- * @brief CatalystCX - A cross-platform single-header C++ library for executing and managing external processes (or commands).
+ * @brief CatalystCX - A cross-platform single-file C++ library/module for executing and managing external processes (or commands).
  * @file CatalystCX.cppm
  * @version 0.0.1
  * @author assembler-0
+ * @date 20-09-25 (last modified)
+ * @note EXPERIMENTAL MODULE - Use with caution (I genuinely have no idea how to even compile it :-))
  */
 
-export module CatalystCX;
+module;
 
 #include <algorithm>
 #include <array>
@@ -42,7 +44,13 @@ extern char **environ;
 #endif
 #endif
 
+export module CatalystCX;
+
 namespace fs = std::filesystem;
+
+#ifndef CCX_VERSION
+#define CCX_VERSION "0.0.1"
+#endif
 
 #ifndef EXIT_FAIL_EC
 #define EXIT_FAIL_EC 127

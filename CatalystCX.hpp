@@ -3,9 +3,10 @@
 // Licensed under GPL-3.0-or-later
 
 /**
- * @brief CatalystCX - A cross-platform single-header C++ library for executing and managing external processes (or commands).
+ * @brief CatalystCX - A cross-platform single-file C++ library/module for executing and managing external processes (or commands).
  * @file CatalystCX.hpp
  * @version 0.0.1
+ * @date 20-09-25 (last modified)
  * @author assembler-0
  */
 
@@ -228,7 +229,7 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
         result.Usage.PageFaultCount = pmc.PageFaultCount;
     }
 
-    // Gather output after process has exited (pipes should be closed by child)
+    // Gather output after process has exited (child should close pipes)
     auto [stdout_result, stderr_result] = reader_future.get();
     result.Stdout = std::move(stdout_result);
     result.Stderr = std::move(stderr_result);
