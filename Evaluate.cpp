@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2025 assembler-0
 // Licensed under GPL-3.0-or-later
-#include "CatalystCX.hpp"
-#include <iostream>
 #include <cassert>
 #include <chrono>
+#include <iostream>
 #include <thread>
+#include "CatalystCX.hpp"
 
 class TestRunner {
-private:
     int passed = 0;
     int failed = 0;
     

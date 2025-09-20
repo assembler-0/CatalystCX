@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
 # Test suite executable
-add_executable(cxtest Evaluate.cpp)
+add_executable(cxtest Evaluate.cpp CatalystCX.hpp)
 
 # Custom target to run tests
 add_custom_target(test
@@ -19,3 +19,6 @@ add_custom_target(test
 
 # Install header
 install(FILES CatalystCX.hpp DESTINATION include)
+
+find_package(Threads REQUIRED)
+target_link_libraries(cxtest PRIVATE Threads::Threads)
