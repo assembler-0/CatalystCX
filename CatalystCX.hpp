@@ -145,7 +145,7 @@ public:
         return *this;
     }
 
-    [[nodiscard]] CommandResult Status();
+    [[nodiscard]] CommandResult Execute();
     [[nodiscard]] std::optional<Child> Spawn();
 
 private:
@@ -730,7 +730,7 @@ inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
 
 #endif
 
-inline CommandResult Command::Status() {
+inline CommandResult Command::Execute() {
     if (const auto child = Spawn()) {
         return child->Wait(TimeoutDuration);
     }

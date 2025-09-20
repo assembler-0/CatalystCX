@@ -39,17 +39,17 @@ void TestBasicExecution(TestRunner& runner) {
     std::cout << "\n=== Basic Execution Tests ===" << std::endl;
     
     // Test simple command
-    auto result = Command("echo").Arg("hello").Status();
+    auto result = Command("echo").Arg("hello").Execute();
     runner.Assert(result.ExitCode == 0, "Echo command success");
     runner.Assert(result.Stdout.find("hello") != std::string::npos, "Echo output correct");
     
     // Test command with multiple args
-    result = Command("echo").Args({"hello", "world"}).Status();
+    result = Command("echo").Args({"hello", "world"}).Execute();
     runner.Assert(result.ExitCode == 0, "Multiple args success");
     runner.Assert(result.Stdout.find("hello world") != std::string::npos, "Multiple args output");
     
     // Test command failure
-    result = Command("false").Status();
+    result = Command("false").Execute();
     runner.Assert(result.ExitCode == 1, "False command exit code");
 }
 
@@ -75,7 +75,7 @@ void TestTimeout(TestRunner& runner) {
     
     // Test timeout functionality
     const auto start = std::chrono::steady_clock::now();
-    const auto result = Command("sleep").Arg("5").Timeout(std::chrono::seconds(1)).Status();
+    const auto result = Command("sleep").Arg("5").Timeout(std::chrono::seconds(1)).Execute();
     const auto duration = std::chrono::steady_clock::now() - start;
     
     runner.Assert(result.TimedOut, "Command timed out");
@@ -106,7 +106,7 @@ void TestEnvironmentVariables(TestRunner& runner) {
 
     const auto result = Command("printenv").Arg("TEST_VAR")
                     .Environment("TEST_VAR", "test_value")
-                    .Status();
+                    .Execute();
     
     runner.Assert(result.ExitCode == 0, "Environment variable set");
     runner.Assert(result.Stdout.find("test_value") != std::string::npos, "Environment variable value");
@@ -115,7 +115,7 @@ void TestEnvironmentVariables(TestRunner& runner) {
 void TestWorkingDirectory(TestRunner& runner) {
     std::cout << "\n=== Working Directory Tests ===" << std::endl;
 
-    const auto result = Command("pwd").WorkingDirectory("/tmp").Status();
+    const auto result = Command("pwd").WorkingDirectory("/tmp").Execute();
     runner.Assert(result.ExitCode == 0, "Working directory command success");
     runner.Assert(result.Stdout.find("/tmp") != std::string::npos, "Working directory set correctly");
 }
@@ -128,7 +128,7 @@ void TestErrorHandling(TestRunner& runner) {
     runner.Assert(!child.has_value(), "Non-existent command fails to spawn");
     
     // Test command that writes to stderr
-    const auto result = Command("sh").Args({"-c", "echo error >&2; exit 42"}).Status();
+    const auto result = Command("sh").Args({"-c", "echo error >&2; exit 42"}).Execute();
     runner.Assert(result.ExitCode == 42, "Custom exit code preserved");
     runner.Assert(result.Stderr.find("error") != std::string::npos, "Stderr captured");
 }
@@ -137,7 +137,7 @@ void TestResourceUsage(TestRunner& runner) {
     std::cout << "\n=== Resource Usage Tests ===" << std::endl;
     
 #ifdef __linux__
-    const auto result = Command("dd").Args({"if=/dev/zero", "of=/dev/null", "bs=1M", "count=10"}).Status();
+    const auto result = Command("dd").Args({"if=/dev/zero", "of=/dev/null", "bs=1M", "count=10"}).Execute();
     runner.Assert(result.ExitCode == 0, "DD command success");
     runner.Assert(result.Usage.UserCpuTime >= 0, "User CPU time recorded");
     runner.Assert(result.Usage.SystemCpuTime >= 0, "System CPU time recorded");
@@ -151,12 +151,12 @@ void TestPipeHandling(TestRunner& runner) {
     std::cout << "\n=== Pipe Handling Tests ===" << std::endl;
     
     // Test large output
-    auto result = Command("seq").Args({"1", "1000"}).Status();
+    auto result = Command("seq").Args({"1", "1000"}).Execute();
     runner.Assert(result.ExitCode == 0, "Large output command success");
     runner.Assert(result.Stdout.find("1000") != std::string::npos, "Large output captured");
     
     // Test mixed stdout/stderr
-    result = Command("sh").Args({"-c", "echo stdout; echo stderr >&2"}).Status();
+    result = Command("sh").Args({"-c", "echo stdout; echo stderr >&2"}).Execute();
     runner.Assert(result.Stdout.find("stdout") != std::string::npos, "Stdout separated");
     runner.Assert(result.Stderr.find("stderr") != std::string::npos, "Stderr separated");
 }
@@ -179,12 +179,12 @@ void TestProcessInfo(TestRunner& runner) {
     std::cout << "\n=== Process Info Tests ===" << std::endl;
     
     // Test normal exit
-    auto result = Command("true").Status();
+    auto result = Command("true").Execute();
     std::string info = SignalInfo::GetProcessInfo(result);
     runner.Assert(info.find("Exited normally") != std::string::npos, "Normal exit info");
     
     // Test timeout info
-    result = Command("sleep").Arg("5").Timeout(std::chrono::milliseconds(100)).Status();
+    result = Command("sleep").Arg("5").Timeout(std::chrono::milliseconds(100)).Execute();
     info = SignalInfo::GetProcessInfo(result);
     runner.Assert(info.find("timed out") != std::string::npos, "Timeout info");
 }
@@ -197,11 +197,11 @@ void TestEdgeCases(TestRunner& runner) {
     runner.Assert(!ExecutionValidator::CanExecuteCommand(empty_args), "Empty args rejected");
     
     // Command with spaces in args
-    auto result = Command("echo").Arg("hello world").Status();
+    auto result = Command("echo").Arg("hello world").Execute();
     runner.Assert(result.Stdout.find("hello world") != std::string::npos, "Spaces in args handled");
     
     // Very short timeout
-    result = Command("sleep").Arg("1").Timeout(std::chrono::milliseconds(1)).Status();
+    result = Command("sleep").Arg("1").Timeout(std::chrono::milliseconds(1)).Execute();
     runner.Assert(result.TimedOut, "Very short timeout works");
 }
 
@@ -276,17 +276,17 @@ void TestLargeStdoutStderr(TestRunner& runner) {
     std::cout << "\n=== Large Stdout/Stderr Tests ===" << std::endl;
 
     // Large stdout (~5MB)
-    auto res = Command("sh").Args({"-c", "dd if=/dev/zero bs=1M count=5 2>/dev/null"}).Status();
+    auto res = Command("sh").Args({"-c", "dd if=/dev/zero bs=1M count=5 2>/dev/null"}).Execute();
     runner.Assert(res.ExitCode == 0, "Large stdout command success");
     runner.Assert(res.Stdout.size() >= 5 * 1024 * 1024, "Large stdout captured without deadlock");
 
     // Large stderr (~5MB zeros)
-    res = Command("sh").Args({"-c", "dd if=/dev/zero of=/dev/stderr bs=1M count=5 1>/dev/null"}).Status();
+    res = Command("sh").Args({"-c", "dd if=/dev/zero of=/dev/stderr bs=1M count=5 1>/dev/null"}).Execute();
     runner.Assert(res.ExitCode == 0, "Large stderr command success");
     runner.Assert(res.Stderr.size() >= 5 * 1024 * 1024, "Large stderr captured without deadlock");
 
     // Interleaved stdout and stderr
-    res = Command("sh").Args({"-c", "for i in $(seq 1 2000); do echo outline; echo errline >&2; done"}).Status();
+    res = Command("sh").Args({"-c", "for i in $(seq 1 2000); do echo outline; echo errline >&2; done"}).Execute();
     runner.Assert(res.ExitCode == 0, "Interleaved out/err success");
     runner.Assert(res.Stdout.find("outline") != std::string::npos, "Interleaved stdout captured");
     runner.Assert(res.Stderr.find("errline") != std::string::npos, "Interleaved stderr captured");
@@ -310,7 +310,7 @@ void TestWorkingDirectoryRelativeExec(TestRunner& runner) {
     }
     chmod(script_path.c_str(), 0755);
 
-    const auto res = Command("sh").Args({"-c", "./" + script}).WorkingDirectory(dir).Status();
+    const auto res = Command("sh").Args({"-c", "./" + script}).WorkingDirectory(dir).Execute();
     runner.Assert(res.ExitCode == 0, "Run relative executable in working dir");
     runner.Assert(res.Stdout.find("temp-ok") != std::string::npos, "Relative exec output correct");
 
@@ -346,14 +346,14 @@ void TestEnvMergingAndOverride(TestRunner& runner) {
 
     // New variable should be visible
     auto res = Command("sh").Args({"-c", "printf '%s' \"$NEW_VAR\""})
-                    .Environment("NEW_VAR", "new_value").Status();
+                    .Environment("NEW_VAR", "new_value").Execute();
     runner.Assert(res.ExitCode == 0, "New env var set");
     runner.Assert(res.Stdout == "new_value", "New env var value visible");
 
     // Override an env var for the child only
     // Use HOME which should exist; don't leak to parent
     res = Command("sh").Args({"-c", "printf '%s' \"$HOME\""})
-            .Environment("HOME", "/tmp/testhome").Status();
+            .Environment("HOME", "/tmp/testhome").Execute();
     runner.Assert(res.ExitCode == 0, "Override env var success");
     runner.Assert(res.Stdout == "/tmp/testhome", "Override value applied in child");
 }
