@@ -17,6 +17,10 @@ add_custom_target(test
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+add_compile_definitions(
+        WCOREDUMP
+)
+
 # Install header
 install(FILES CatalystCX.hpp DESTINATION include)
 

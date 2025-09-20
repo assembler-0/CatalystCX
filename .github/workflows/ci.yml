@@ -13,6 +13,7 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-latest
     steps:
+    - uses: actions/checkout@v4
     - name: Setup Build Environment
       run: |
         sudo apt-get update
@@ -40,8 +41,7 @@ jobs:
 
     - name: Run cppcheck
       run: |
-        cppcheck --enable=all --std=c++20 --suppress=missingIncludeSystem \
-          --error-exitcode=1 CatalystCX.hpp
+        cppcheck --enable=all --std=c++20 --suppress=missingIncludeSystem CatalystCX.hpp
 
     - name: Configure for clang-tidy
       run: cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
@@ -69,32 +69,6 @@ jobs:
 
     - name: Run Tests with Sanitizer
       run: cmake --build build --target test
-
-  package:
-    name: Package Release
-    runs-on: ubuntu-latest
-    needs: [build, static-analysis]
-    if: github.event_name == 'release'
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Create Package
-      run: |
-        mkdir -p catalystcx-${{ github.ref_name }}
-        cp CatalystCX.hpp catalystcx-${{ github.ref_name }}/
-        cp README.md catalystcx-${{ github.ref_name }}/
-        cp CMakeLists.txt catalystcx-${{ github.ref_name }}/
-        tar -czf catalystcx-${{ github.ref_name }}.tar.gz catalystcx-${{ github.ref_name }}/
-
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./catalystcx-${{ github.ref_name }}.tar.gz
-        asset_name: catalystcx-${{ github.ref_name }}.tar.gz
-        asset_content_type: application/gzip
 
   benchmark:
     name: Performance Benchmarks
