@@ -46,7 +46,7 @@ CatalystCX provides a fluent API for building and executing commands with securi
 
 int main() {
     auto result = Command("echo").Arg("Hello, World!").Execute();
-    std::cout << result.Stdout; // "Hello, World!\n"
+    std::cout << result.Vaule().Stdout; // "Hello, World!\n"
     return result.ExitCode;
 }
 ```
@@ -83,7 +83,7 @@ cp CatalystCX.hpp /your/project/include/
 #include <iostream>
 
 int main() {
-    CommandResult result = Command("ls").Arg("-l").Execute();
+    CommandResult result = Command("ls").Arg("-l").Execute().Value();
 
     std::cout << "Exit Code: " << result.ExitCode << std::endl;
     std::cout << "Stdout:\n" << result.Stdout << std::endl;
@@ -103,7 +103,7 @@ int main() {
         return 1;
     }
 
-    const Child& child = spawn.Value();
+    const auto& child = spawn.Value();
     std::cout << "Process spawned with PID: " << child.GetPid() << std::endl;
 
     // ... do other work ...
@@ -114,7 +114,7 @@ int main() {
         return 1;
     }
 
-    const CommandResult& result = wait.Value();
+    const auto& result = wait.Value();
     std::cout << "Sleep command finished. Exit: " << result.ExitCode << std::endl;
 }
 ```
@@ -126,7 +126,7 @@ auto result = Command("ping").Arg("8.8.8.8")
                   .Timeout(std::chrono::seconds(2))
                   .Execute();
 
-if (result.TimedOut) {
+if (result.Value().TimedOut) {
     std::cout << "Command timed out!" << std::endl;
 }
 ```
@@ -140,7 +140,7 @@ auto result = Command("printenv")
     .WorkingDirectory("/tmp")
     .Execute();
 
-std::cout << result.Stdout; // "Hello\n"
+std::cout << result.Vaule().Stdout; // "Hello\n"
 ```
 
 ### Signal Handling and Process Information
@@ -269,7 +269,7 @@ while (retries-- > 0) {
         .Timeout(std::chrono::seconds(30))
         .Execute();
     
-    if (result.ExitCode == 0) break;
+    if (result.Vaule().ExitCode == 0) break;
     
     std::cerr << "Attempt failed, retries left: " << retries << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
