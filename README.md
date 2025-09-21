@@ -93,15 +93,29 @@ int main() {
 ### Asynchronous Execution
 
 ```cpp
-if (auto child = Command("sleep").Arg("5").Spawn()) {
-    std::cout << "Process spawned with PID: " << child->GetPid() << std::endl;
+#include <CatalystCX.hpp>
+#include <iostream>
+
+int main() {
+    auto spawn = Command("sleep").Arg("5").Spawn(); // Errors::Result<Child>
+    if (spawn.IsError()) {
+        std::cerr << "Failed to spawn process: " << spawn.Error().FullMessage() << std::endl;
+        return 1;
+    }
+
+    const Child& child = spawn.Value();
+    std::cout << "Process spawned with PID: " << child.GetPid() << std::endl;
 
     // ... do other work ...
 
-    CommandResult result = child->Wait();
-    std::cout << "Sleep command finished." << std::endl;
-} else {
-    std::cerr << "Failed to spawn process." << std::endl;
+    auto wait = child.Wait(); // Errors::Result<CommandResult>
+    if (wait.IsError()) {
+        std::cerr << "Wait failed: " << wait.Error().FullMessage() << std::endl;
+        return 1;
+    }
+
+    const CommandResult& result = wait.Value();
+    std::cout << "Sleep command finished. Exit: " << result.ExitCode << std::endl;
 }
 ```
 
@@ -132,18 +146,46 @@ std::cout << result.Stdout; // "Hello\n"
 ### Signal Handling and Process Information
 
 ```cpp
-auto child = Command("sleep").Arg("10").Spawn();
-if (child) {
+#include <CatalystCX.hpp>
+#include <thread>
+#include <iostream>
+
+int main() {
+    auto spawn = Command("sleep").Arg("10").Spawn();
+    if (spawn.IsError()) {
+        std::cerr << "Spawn failed: " << spawn.Error().FullMessage() << std::endl;
+        return 1;
+    }
+    Child child = spawn.Value();
+
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    child->Kill(SIGTERM);
-    
-    auto result = child->Wait();
+
+#ifndef _WIN32
+    auto killRes = child.Kill(SIGTERM);
+#else
+    auto killRes = child.Kill(); // Windows ignores POSIX signals
+#endif
+    if (killRes.IsError()) {
+        std::cerr << "Kill failed: " << killRes.Error().FullMessage() << std::endl;
+    }
+
+    auto wait = child.Wait();
+    if (wait.IsError()) {
+        std::cerr << "Wait failed: " << wait.Error().FullMessage() << std::endl;
+        return 1;
+    }
+
+    const auto& result = wait.Value();
     if (result.KilledBySignal) {
-        std::cout << "Process killed by signal: " 
-                  << SignalInfo::GetSignalName(result.TerminatingSignal) 
+        std::cout << "Process killed by signal: "
+#ifndef _WIN32
+                  << SignalInfo::GetSignalName(result.TerminatingSignal)
+#else
+                  << result.TerminatingSignal
+#endif
                   << std::endl;
     }
-    
+
     // Get human-readable process info
     std::cout << SignalInfo::GetProcessInfo(result) << std::endl;
 }
@@ -174,23 +216,28 @@ std::cout << "Page Faults: " << result.Usage.PageFaultCount << std::endl;
 
 ### Multiple Arguments
 ```cpp
-std::vector<std::string> args = {"arg1", "arg2"};
-cmd.Args(args);
+Command cmd("myprog");
 
-std::array<std::string, 3> args = {"arg1", "arg2", "arg3"};
-cmd.Args(args);
+// std::vector
+std::vector<std::string> v = {"arg1", "arg2"};
+cmd.Args(v);
 
-std::initializer_list<std::string> args = {"arg1", "arg2"};
-cmd.Args(args);
+// std::array
+std::array<std::string, 3> a = {"arg1", "arg2", "arg3"};
+cmd.Args(a);
 
+// initializer_list
+cmd.Args({"arg1", "arg2"});
+
+// std::vector<string_view>
 cmd.Args(std::vector<std::string_view>{"arg1", "arg2"});
 
-// Or C-style arrays:
-const char* args[] = {"arg1", "arg2"};
-cmd.Args(args);
+// C-style array
+const char* cargs[] = {"arg1", "arg2"};
+cmd.Args(cargs);
 
-// Or use builtin expansion:
-cmd.Args(utils::Expand({"arg1", "arg2"}));
+// Built-in expansion helper
+cmd.Args(Utils::Expand({"arg1", "arg2"}));
 ```
 
 ### Batch Processing
@@ -229,6 +276,70 @@ while (retries-- > 0) {
 }
 ```
 
+## Error Handling
+
+CatalystCX uses a lightweight result type for robust, explicit error handling.
+
+- Errors::Result<T>: holds either a value T or an Errors::ErrorInfo.
+- Errors::Result<void>: holds success or an error.
+- CommandResult also includes ExecutionError for issues that occurred during execution (e.g., timeouts).
+
+Examples:
+
+```cpp
+// Spawning a process
+auto spawn = Command("does-not-exist").Spawn();
+if (spawn.IsError()) {
+    const auto& e = spawn.Error();
+    std::cerr << "Spawn failed: " << e.Message << "\nDetails: " << e.Details
+              << "\nSuggestion: " << e.Suggestion << std::endl;
+}
+
+// Waiting on a child
+auto spawn2 = Command("echo").Arg("hi").Spawn();
+if (spawn2.IsOk()) {
+    auto wait = spawn2.Value().Wait();
+    if (wait.IsOk()) {
+        const auto& res = wait.Value();
+        if (res.HasExecutionError()) {
+            std::cerr << res.ExecutionError.FullMessage() << std::endl;
+        }
+    } else {
+        std::cerr << wait.Error().FullMessage() << std::endl;
+    }
+}
+
+// Inspecting CommandResult for summary
+auto res = Command("sh").Arg("-c").Arg("exit 7").Execute();
+if (!res.IsSuccessful()) {
+    std::cerr << res.GetErrorSummary() << std::endl;
+}
+```
+
+### Error Codes and Categories
+
+ErrorInfo contains:
+- Code (ErrorCode): e.g., ExecutableNotFound, SpawnFailed, ExecutionTimeout
+- Category (ErrorCategory): Validation, System, Process, Timeout, Permission, Resource, Platform
+- Message, Details, Suggestion and SystemErrorCode
+
+## API Reference (Quick)
+
+- Command
+  - Arg(string), Args(range), Environment(key, value), WorkingDirectory(path), Timeout(duration)
+  - Execute() -> Errors::Result<CommandResult>
+  - Spawn() -> Errors::Result<Child>
+- Child
+  - GetPid()
+  - Wait([timeout]) -> Errors::Result<CommandResult>
+  - Kill([signal]) -> Errors::Result<void>
+- CommandResult
+  - ExitCode, Stdout, Stderr, ExecutionTime, TimedOut
+  - Signal info: KilledBySignal, TerminatingSignal, CoreDumped, Stopped, StopSignal
+  - Usage: platform-specific resource usage fields
+  - ExecutionError: Errors::ErrorInfo
+  - helpers: IsSuccessful(), HasOutput(), HasExecutionError(), GetErrorSummary()
+
 ## Testing
 
 ```bash
@@ -264,6 +375,6 @@ Contributions are welcome! Please feel free to submit a pull request, open an is
 
 ## License
 
-This project is licensed under the [GPLv3 License—](LICENSE)see the LICENSE file for details.
+This project is licensed under the GPLv3. See the [LICENSE](LICENSE) file for details.
 
 ---
