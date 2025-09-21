@@ -169,8 +169,9 @@ public:
     template<std::ranges::range R>
     requires Concepts::StringLike<std::ranges::range_value_t<R>>
     Command& Args(R&& arguments) {
-        const auto size_hint = std::ranges::distance(arguments);
-        Arguments.reserve(Arguments.size() + static_cast<size_t>(size_hint));
+        if constexpr (std::ranges::sized_range<R>) {
+            Arguments.reserve(static_cast<size_t>(std::ranges::size(arguments)));
+        }
         std::ranges::copy(arguments, std::back_inserter(Arguments));
         return *this;
     }
@@ -344,18 +345,15 @@ public:
 
         const char* path_env = getenv("PATH");
         if (!path_env) return false;
-
         const std::string_view path_str(path_env);
         return std::ranges::any_of(
             std::views::split(path_str, ':'),
             [cmd_view](const auto& dir_range) {
                 const std::string_view dir{dir_range.begin(), dir_range.end()};
                 if (dir.empty()) return false;
-                const auto full_path = std::filesystem::path(dir) / cmd_view;
-                return std::filesystem::exists(full_path) &&
-                       (std::filesystem::status(full_path).permissions() & std::filesystem::perms::owner_exec) != std::filesystem::perms::none;
-            }
-        );
+                const auto full_path = (std::filesystem::path(dir) / std::string(cmd_view));
+                return ::access(full_path.c_str(), X_OK) == 0;
+            });
 
 #endif
     }
@@ -557,16 +555,6 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, Buffer& buffer) n
     return false;
 }
 
-inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
-    DWORD attrs = GetFileAttributesA(path.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    std::wstring wcommand(command.begin(), command.end());
-    DWORD needed = SearchPathW(nullptr, wcommand.c_str(), L".exe", 0, nullptr, nullptr);
-    return needed > 0;
-}
 
 #else
 

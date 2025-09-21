@@ -190,7 +190,7 @@ const char* args[] = {"arg1", "arg2"};
 cmd.Args(args);
 
 // Or use builtin expansion:
-cmd.Args(Uitils::Expand({"arg1", "arg2"}));
+cmd.Args(utils::Expand({"arg1", "arg2"}));
 ```
 
 ### Batch Processing
@@ -201,7 +201,7 @@ std::vector<std::future<CommandResult>> futures;
 
 for (const auto& file : files) {
     futures.push_back(std::async(std::launch::async, [&file]() {
-        return Command("wc").Args(Uitils::Expand({"-l", file})).Execute();
+        return Command("wc").Args(Utils::Expand({"-l", file})).Execute();
     }));
 }
 
@@ -264,6 +264,6 @@ Contributions are welcome! Please feel free to submit a pull request, open an is
 
 ## License
 
-This project is licensed under the [GPLv3 License](LICENSE) - see the LICENSE file for details.
+This project is licensed under the [GPLv3 License—](LICENSE)see the LICENSE file for details.
 
 ---
