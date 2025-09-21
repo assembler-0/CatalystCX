@@ -18,6 +18,8 @@
 #include <array>
 #include <chrono>
 #include <concepts>
+#include <csignal>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <optional>
@@ -27,8 +29,8 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
-#include <csignal>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -47,6 +49,11 @@
 extern char **environ;
 #endif
 #endif
+
+#define CatalystCX_VERSION "0.0.1"
+#define CatalystCX_VERSION_MAJOR 0
+#define CatalystCX_VERSION_MINOR 0
+#define CatalystCX_VERSION_PATCH 1
 
 namespace fs = std::filesystem;
 
@@ -70,6 +77,252 @@ namespace Concepts {
     };
 }
 
+// Error Handling System
+namespace Errors {
+    enum class ErrorCategory : uint8_t {
+        None = 0,
+        Validation,     // Invalid arguments, missing executable, etc.
+        System,         // System call failures (pipe, fork, etc.)
+        Process,        // Process-related errors (spawn failure, etc.)
+        Timeout,        // Timeout-related errors
+        Permission,     // Permission-related errors
+        Resource,       // Resource exhaustion (memory, file descriptors, etc.)
+        Platform        // Platform-specific errors
+    };
+
+    enum class ErrorCode : uint16_t {
+        // Success
+        Success = 0,
+
+        // Validation Errors (100-199)
+        EmptyCommand = 100,
+        ExecutableNotFound = 101,
+        InvalidArguments = 102,
+        InvalidWorkingDirectory = 103,
+
+        // System Errors (200-299)
+        PipeCreationFailed = 200,
+        ForkFailed = 201,
+        ExecFailed = 202,
+        EnvironmentSetupFailed = 203,
+        FileDescriptorError = 204,
+
+        // Process Errors (300-399)
+        SpawnFailed = 300,
+        ProcessAlreadyFinished = 301,
+        ProcessNotFound = 302,
+        KillFailed = 303,
+        WaitFailed = 304,
+
+        // Timeout Errors (400-499)
+        ExecutionTimeout = 400,
+        WaitTimeout = 401,
+
+        // Permission Errors (500-599)
+        ExecutePermissionDenied = 500,
+        DirectoryAccessDenied = 501,
+
+        // Resource Errors (600-699)
+        OutOfMemory = 600,
+        TooManyOpenFiles = 601,
+        ProcessLimitReached = 602,
+
+        // Platform Errors (700-799)
+        WindowsApiError = 700,
+        PosixError = 701,
+        MacOSError = 702,
+
+        // Unknown
+        Unknown = 999
+    };
+
+    struct ErrorInfo {
+        ErrorCode Code = ErrorCode::Success;
+        ErrorCategory Category = ErrorCategory::None;
+        std::string Message;
+        std::string Details;        // Platform-specific details
+        std::string Suggestion;     // Recovery suggestion
+        int SystemErrorCode = 0;    // Platform errno/GetLastError()
+
+        [[nodiscard]] constexpr bool IsSuccess() const noexcept {
+            return Code == ErrorCode::Success;
+        }
+
+        [[nodiscard]] constexpr bool IsFailure() const noexcept {
+            return !IsSuccess();
+        }
+
+        [[nodiscard]] std::string FullMessage() const {
+            std::string full = Message;
+            if (!Details.empty()) {
+                full += " (Details: " + Details + ")";
+            }
+            if (!Suggestion.empty()) {
+                full += " Suggestion: " + Suggestion;
+            }
+            if (SystemErrorCode != 0) {
+                full += " [System Error: " + std::to_string(SystemErrorCode) + "]";
+            }
+            return full;
+        }
+    };
+
+    // Result-like type for better error handling
+    template<typename T>
+    class Result {
+        std::variant<T, ErrorInfo> data_;
+    public:
+        constexpr explicit Result(T&& value) noexcept : data_(std::move(value)) {}
+        constexpr explicit Result(const T& value) : data_(value) {}
+        constexpr explicit Result(ErrorInfo error) noexcept : data_(std::move(error)) {}
+
+        [[nodiscard]] constexpr bool IsOk() const noexcept {
+            return std::holds_alternative<T>(data_);
+        }
+
+        [[nodiscard]] constexpr bool IsError() const noexcept {
+            return !IsOk();
+        }
+
+        [[nodiscard]] constexpr const T& Value() const& {
+            if (IsError()) {
+                throw std::runtime_error("Attempted to access value of error result: " + Error().FullMessage());
+            }
+            return std::get<T>(data_);
+        }
+
+        [[nodiscard]] constexpr T&& Value() && {
+            if (IsError()) {
+                throw std::runtime_error("Attempted to access value of error result: " + Error().FullMessage());
+            }
+            return std::get<T>(std::move(data_));
+        }
+
+        [[nodiscard]] constexpr const ErrorInfo& Error() const& {
+            if (IsOk()) {
+                static const ErrorInfo success{};
+                return success;
+            }
+            return std::get<ErrorInfo>(data_);
+        }
+
+        [[nodiscard]] constexpr T ValueOr(T&& default_value) const& {
+            return IsOk() ? Value() : std::move(default_value);
+        }
+
+        // Monadic operations
+        template<typename F>
+        [[nodiscard]] constexpr auto Map(F&& func) const& -> Result<std::invoke_result_t<F, const T&>> {
+            if (IsError()) {
+                return Error();
+            }
+            return func(Value());
+        }
+
+        template<typename F>
+        [[nodiscard]] constexpr auto AndThen(F&& func) const& -> std::invoke_result_t<F, const T&> {
+            if (IsError()) {
+                return Error();
+            }
+            return func(Value());
+        }
+    };
+
+    // Specialization for void operations
+    template<>
+    class Result<void> {
+        std::optional<ErrorInfo> error_;
+
+    public:
+        constexpr Result() noexcept : error_(std::nullopt) {}
+        constexpr explicit Result(ErrorInfo error) noexcept : error_(std::move(error)) {}
+
+        [[nodiscard]] constexpr bool IsOk() const noexcept {
+            return !error_.has_value();
+        }
+
+        [[nodiscard]] constexpr bool IsError() const noexcept {
+            return error_.has_value();
+        }
+
+        [[nodiscard]] constexpr const ErrorInfo& Error() const& {
+            if (IsOk()) {
+                static const ErrorInfo success{};
+                return success;
+            }
+            return *error_;
+        }
+
+        constexpr void Value() const {
+            if (IsError()) throw std::runtime_error("Attempted to access value of error result: " + Error().FullMessage());
+
+        }
+
+        template<typename F>
+        [[nodiscard]] constexpr auto AndThen(F&& func) const -> std::invoke_result_t<F> {
+            if (IsError()) return Error();
+            return func();
+        }
+    };
+
+    // Error creation helpers
+    [[nodiscard]] inline ErrorInfo MakeError(ErrorCode code, std::string message, 
+                                             std::string details = "", std::string suggestion = "") {
+        ErrorInfo error;
+        error.Code = code;
+        error.Message = std::move(message);
+        error.Details = std::move(details);
+        error.Suggestion = std::move(suggestion);
+
+        // Determine category from code
+        if (const auto code_val = static_cast<uint16_t>(code); code_val >= 100 && code_val < 200) error.Category = ErrorCategory::Validation;
+        else if (code_val >= 200 && code_val < 300) error.Category = ErrorCategory::System;
+        else if (code_val >= 300 && code_val < 400) error.Category = ErrorCategory::Process;
+        else if (code_val >= 400 && code_val < 500) error.Category = ErrorCategory::Timeout;
+        else if (code_val >= 500 && code_val < 600) error.Category = ErrorCategory::Permission;
+        else if (code_val >= 600 && code_val < 700) error.Category = ErrorCategory::Resource;
+        else if (code_val >= 700 && code_val < 800) error.Category = ErrorCategory::Platform;
+
+#ifdef _WIN32
+        error.SystemErrorCode = static_cast<int>(GetLastError());
+#else
+        error.SystemErrorCode = errno;
+#endif
+
+        return error;
+    }
+
+    [[nodiscard]] inline ErrorInfo MakeSystemError(const ErrorCode code, std::string message) {
+        std::string details;
+        std::string suggestion;
+
+#ifdef _WIN32
+        const DWORD error_code = GetLastError();
+        LPSTR message_buffer = nullptr;
+        const size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                         nullptr, error_code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                         reinterpret_cast<LPSTR>(&message_buffer), 0, nullptr);
+        if (message_buffer) {
+            details = std::string(message_buffer, size);
+            LocalFree(message_buffer);
+        }
+#else
+        const int err = errno; // snapshot
+        details = std::strerror(err);
+        switch (err) {
+            case EACCES: suggestion = "Check file permissions and executable bit"; break;
+            case ENOENT: suggestion = "Verify the executable path exists and is in PATH"; break;
+            case ENOMEM: suggestion = "Free up system memory or increase limits"; break;
+            case EMFILE: suggestion = "Close unused file descriptors or increase ulimits"; break;
+            case EAGAIN: suggestion = "Retry the operation or check system process limits"; break;
+            default: break;
+        }
+#endif
+
+        return MakeError(code, std::move(message), std::move(details), std::move(suggestion));
+    }
+}
+
 struct CommandResult {
     int ExitCode{};
     std::string Stdout;
@@ -82,6 +335,9 @@ struct CommandResult {
     bool CoreDumped = false;
     bool Stopped = false;
     int StopSignal = 0;
+
+    // Enhanced error information
+    Errors::ErrorInfo ExecutionError{};  // Details about any execution issues
 
     struct ResourceUsage {
 #if defined(__linux__)
@@ -101,11 +357,31 @@ struct CommandResult {
     } Usage{};
 
     [[nodiscard]] constexpr bool IsSuccessful() const noexcept {
-        return ExitCode == 0 && !TimedOut && !KilledBySignal;
+        return ExitCode == 0 && !TimedOut && !KilledBySignal && ExecutionError.IsSuccess();
     }
 
     [[nodiscard]] constexpr bool HasOutput() const noexcept {
         return !Stdout.empty() || !Stderr.empty();
+    }
+
+    [[nodiscard]] constexpr bool HasExecutionError() const noexcept {
+        return ExecutionError.IsFailure();
+    }
+
+    [[nodiscard]] std::string GetErrorSummary() const {
+        if (ExecutionError.IsFailure()) {
+            return ExecutionError.FullMessage();
+        }
+        if (TimedOut) {
+            return "Process execution timed out";
+        }
+        if (KilledBySignal) {
+            return "Process was killed by signal " + std::to_string(TerminatingSignal);
+        }
+        if (ExitCode != 0) {
+            return "Process exited with non-zero code: " + std::to_string(ExitCode);
+        }
+        return "No errors";
     }
 };
 
@@ -130,13 +406,13 @@ public:
         : ProcessId(pid), StdoutFd(stdout_fd), StderrFd(stderr_fd) {}
 #endif
 
-    [[nodiscard]] CommandResult Wait(std::optional<std::chrono::duration<double>> timeout = std::nullopt) const;
+    [[nodiscard]] Errors::Result<CommandResult> Wait(std::optional<std::chrono::duration<double>> timeout = std::nullopt) const;
     [[nodiscard]] pid_t GetPid() const { return ProcessId; }
 
 #ifdef _WIN32
-    void Kill(int signal = 0) const;
+    [[nodiscard]] Errors::Result<void> Kill(int signal = 0) const;
 #else
-    void Kill(int signal = SIGTERM) const;
+    [[nodiscard]] Errors::Result<void> Kill(int signal = SIGTERM) const;
 #endif
 
 private:
@@ -195,8 +471,8 @@ public:
         return *this;
     }
 
-    [[nodiscard]] CommandResult Execute();
-    [[nodiscard]] std::optional<Child> Spawn();
+    [[nodiscard]] Errors::Result<CommandResult> Execute();
+    [[nodiscard]] Errors::Result<Child> Spawn();
 
 private:
     std::string Executable;
@@ -351,8 +627,8 @@ public:
             [cmd_view](const auto& dir_range) {
                 const std::string_view dir{dir_range.begin(), dir_range.end()};
                 if (dir.empty()) return false;
-                const auto full_path = (std::filesystem::path(dir) / std::string(cmd_view));
-                return ::access(full_path.c_str(), X_OK) == 0;
+                const auto full_path = std::filesystem::path(dir) / std::string(cmd_view);
+                return access(full_path.c_str(), X_OK) == 0;
             });
 
 #endif
@@ -367,7 +643,7 @@ public:
 
 // Windows implementations
 #ifdef _WIN32
-inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
+inline Errors::Result<CommandResult> Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     const auto start_time = std::chrono::steady_clock::now();
     CommandResult result;
 
@@ -415,29 +691,52 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     return result;
 }
 
-inline void Child::Kill(int) const {
-    TerminateProcess(ProcessHandle, 1);
+inline Errors::Result<void> Child::Kill(int) const {
+    if (!TerminateProcess(ProcessHandle, 1)) {
+        return Errors::MakeSystemError(Errors::ErrorCode::KillFailed, 
+                                      "Failed to terminate process");
+    }
+    return {};
 }
 
-inline std::optional<Child> Command::Spawn() {
+inline Errors::Result<Child> Command::Spawn() {
+    // Validate command
+    if (Executable.empty()) {
+        return Errors::MakeError(Errors::ErrorCode::EmptyCommand, 
+                                "Command executable cannot be empty",
+                                "", "Provide a valid executable name or path");
+    }
+
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
 
     if (!ExecutionValidator::CanExecuteCommand(args_vec)) {
-        return std::nullopt;
+        return Errors::MakeError(Errors::ErrorCode::ExecutableNotFound,
+                                "Executable not found: " + Executable,
+                                "", "Verify the executable exists and is in PATH");
+    }
+
+    // Validate working directory if specified
+    if (WorkDir && !fs::exists(*WorkDir)) {
+        return Errors::MakeError(Errors::ErrorCode::InvalidWorkingDirectory,
+                                "Working directory does not exist: " + *WorkDir,
+                                "", "Create the directory or specify a valid path");
     }
 
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
 
     HANDLE stdout_read, stdout_write, stderr_read, stderr_write;
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
-        return std::nullopt;
+        return Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed,
+                                      "Failed to create stdout pipe");
     }
+
     if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0)) {
         CloseHandle(stdout_read);
         CloseHandle(stdout_write);
-        return std::nullopt;
+        return Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed,
+                                      "Failed to create stderr pipe");
     }
 
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
@@ -514,7 +813,28 @@ inline std::optional<Child> Command::Spawn() {
     if (!success) {
         CloseHandle(stdout_read);
         CloseHandle(stderr_read);
-        return std::nullopt;
+
+        const DWORD error_code = GetLastError();
+        std::string suggestion;
+        switch (error_code) {
+            case ERROR_FILE_NOT_FOUND: 
+                suggestion = "Verify the executable path exists";
+                break;
+            case ERROR_ACCESS_DENIED:
+                suggestion = "Check file permissions and security settings";
+                break;
+            case ERROR_NOT_ENOUGH_MEMORY:
+                suggestion = "Free up system memory";
+                break;
+            default:
+                suggestion = "Check Windows event logs for more details";
+                break;
+        }
+
+        return Errors::MakeError(Errors::ErrorCode::SpawnFailed,
+                                "Failed to create process: " + Executable,
+                                "CreateProcessA failed with error " + std::to_string(error_code),
+                                suggestion);
     }
 
     return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
@@ -559,7 +879,7 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, Buffer& buffer) n
 #else
 
 // Unix implementations
-inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
+inline Errors::Result<CommandResult> Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
     const auto start_time = std::chrono::steady_clock::now();
 
     CommandResult result;
@@ -574,7 +894,8 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
         while (std::chrono::steady_clock::now() < timeout_time) {
             const int wait_result = waitpid(ProcessId, &status, WNOHANG);
             if (wait_result == ProcessId) {
-                wait4(ProcessId, &status, 0, &usage); // Get resource usage
+                // Child finished; collect final status
+                waitpid(ProcessId, &status, 0);
                 break; // Process finished
             }
 
@@ -590,15 +911,18 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
         // Check if we timed out
         if (std::chrono::steady_clock::now() >= timeout_time) {
             if (const int wait_result = waitpid(ProcessId, &status, WNOHANG); wait_result == 0) { // Still running
-                Kill();
+                static_cast<void>(Kill());
                 result.TimedOut = true;
-                wait4(ProcessId, &status, 0, &usage);
+                // Collect final status after terminating
+                waitpid(ProcessId, &status, 0);
             } else if (wait_result == ProcessId) {
-                wait4(ProcessId, &status, 0, &usage);
+                // Already finished; ensure status is reaped
+                waitpid(ProcessId, &status, 0);
             }
         }
     } else {
-        wait4(ProcessId, &status, 0, &usage);
+        // Blocking wait for child process
+        waitpid(ProcessId, &status, 0);
     }
 
     // Collect outputs (reader finishes when pipes close)
@@ -609,6 +933,8 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     close(StdoutFd);
     close(StderrFd);
 
+    // Populate resource usage after child has terminated
+    getrusage(RUSAGE_CHILDREN, &usage);
 #ifdef __linux__
     constexpr long MICROSECONDS_PER_SECOND = 1000000;
     result.Usage.UserCpuTime = usage.ru_utime.tv_sec * MICROSECONDS_PER_SECOND + usage.ru_utime.tv_usec;
@@ -628,8 +954,12 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
             result.KilledBySignal = true;
             result.TerminatingSignal = WTERMSIG(status);
             result.ExitCode = 128 + result.TerminatingSignal;
-#ifdef WCOREDUMP
+#if defined(WCOREFLAG)
+            result.CoreDumped = (status & WCOREFLAG) != 0;
+#elif defined(WCOREDUMP)
             result.CoreDumped = WCOREDUMP(status);
+#else
+            result.CoreDumped = false;
 #endif
         } else if (WIFSTOPPED(status)) {
             result.Stopped = true;
@@ -640,25 +970,39 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     const auto end_time = std::chrono::steady_clock::now();
     result.ExecutionTime = end_time - start_time;
 
-    return result;
+    return Errors::Result(std::move(result));
 }
 
-inline void Child::Kill(const int signal) const {
-    kill(ProcessId, signal);
+inline Errors::Result<void> Child::Kill(const int signal) const {
+    if (kill(ProcessId, signal) == -1) {
+        return Errors::Result<void>(
+            Errors::MakeSystemError(Errors::ErrorCode::KillFailed,
+            "Failed to send signal " + std::to_string(signal) +
+            " to process " + std::to_string(ProcessId)));
+    }
+    return {};
 }
 
-inline std::optional<Child> Command::Spawn() {
+inline Errors::Result<Child> Command::Spawn() {
+    if (Executable.empty()) {
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::EmptyCommand,
+                                                       "Command executable cannot be empty", "",
+                                                       "Provide a valid executable name or path"));
+    }
     std::vector<std::string> args_vec;
     args_vec.push_back(Executable);
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
 
     if (!ExecutionValidator::CanExecuteCommand(args_vec)) {
-        return std::nullopt;
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::ExecutableNotFound,
+                                                       "Executable not found: " + Executable, "",
+                                                       "Verify the executable exists and is in PATH"));
     }
 
     int stdout_pipe[2], stderr_pipe[2];
     if (pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
-        return std::nullopt;
+        return Errors::Result<Child>(
+                Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed, "Failed to create stdout pipe"));
     }
 
 #ifdef __APPLE__
@@ -669,7 +1013,8 @@ inline std::optional<Child> Command::Spawn() {
         posix_spawnattr_init(&attr) != 0) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
-        return std::nullopt;
+        return Errors::MakeSystemError(Errors::ErrorCode::SpawnFailed,
+                                      "Failed to initialize posix_spawn attributes/actions");
     }
 
     posix_spawn_file_actions_adddup2(&file_actions, stdout_pipe[1], STDOUT_FILENO);
@@ -718,14 +1063,18 @@ inline std::optional<Child> Command::Spawn() {
     if (result != 0) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
-        return std::nullopt;
+        return Errors::MakeError(Errors::ErrorCode::SpawnFailed,
+                                 "posix_spawnp failed for: " + Executable,
+                                 std::string(strerror(result)),
+                                 "Verify the executable, PATH, and permissions");
     }
 #else
     const pid_t pid = fork();
     if (pid == -1) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
-        return std::nullopt;
+        return Errors::Result<Child>(
+                Errors::MakeSystemError(Errors::ErrorCode::ForkFailed, "fork() failed"));
     }
 
     if (pid == 0) {
@@ -759,7 +1108,7 @@ inline std::optional<Child> Command::Spawn() {
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
 
-    return Child(pid, stdout_pipe[0], stderr_pipe[0]);
+    return Errors::Result(Child(pid, stdout_pipe[0], stderr_pipe[0]));
 }
 
 // Implementation of AsyncPipeReader
@@ -819,14 +1168,33 @@ inline bool AsyncPipeReader::IsPipeOpen(const int fd) noexcept {
 
 #endif
 
-inline CommandResult Command::Execute() {
-    if (const auto child = Spawn()) {
-        return child->Wait(TimeoutDuration);
+inline Errors::Result<CommandResult> Command::Execute() {
+    auto spawn_result = Spawn();
+    if (spawn_result.IsError()) {
+        // Convert spawn error to CommandResult with error info
+        CommandResult result;
+        result.ExitCode = Constants::EXIT_FAIL_EC;
+        result.ExecutionError = spawn_result.Error();
+        result.Stderr = spawn_result.Error().FullMessage();
+        return Errors::Result(std::move(result));
     }
-    CommandResult result;
-    result.ExitCode = Constants::EXIT_FAIL_EC;
-    result.Stderr = "Failed to spawn process";
-    return result;
+
+    auto wait_result = spawn_result.Value().Wait(TimeoutDuration);
+    if (wait_result.IsError()) {
+        return Errors::Result<CommandResult>(wait_result.Error()); // Propagate wait error
+    }
+
+    auto result = wait_result.Value();
+    if (result.TimedOut) {
+        result.ExecutionError = Errors::MakeError(
+            Errors::ErrorCode::ExecutionTimeout,
+            "Process execution timed out",
+            "Process exceeded the specified timeout duration",
+            "Consider increasing the timeout or optimizing the command"
+        );
+    }
+
+    return Errors::Result(std::move(result));
 }
 
 class SignalInfo {
