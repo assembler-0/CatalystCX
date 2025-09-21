@@ -268,7 +268,7 @@ int main() {
     
     std::cout << "CatalystCX Test Suite" << std::endl;
     std::cout << "=====================" << std::endl;
-    
+
     TestBasicExecution(runner);
     TestAsyncExecution(runner);
     TestTimeout(runner);

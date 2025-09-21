@@ -11,6 +11,14 @@
  */
 
 #pragma once
+
+#if __cplusplus < 202002L
+    #error "CatalystCX requires C++20 or later (-std=c++20)"
+    #define CATALYST_VERSION_CHECK_FAILED
+#endif
+
+#ifndef CATALYST_VERSION_CHECK_FAILED
+
 #ifndef CATALYSTCX_HPP
 #define CATALYSTCX_HPP
 
@@ -1244,5 +1252,7 @@ public:
         return info.str();
     }
 };
+
+#endif
 
 #endif
