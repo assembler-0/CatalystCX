@@ -120,10 +120,11 @@ void TestSignalHandling(TestRunner& runner) {
     } else {
         runner.Assert(false, "Failed to spawn sleep for signal test");
     }
-    
+#ifdef __linux__
     // Test signal name lookup
     runner.Assert(std::string(SignalInfo::GetSignalName(SIGTERM)) == "SIGTERM", "Signal name lookup");
     runner.Assert(std::string(SignalInfo::GetSignalName(SIGKILL)) == "SIGKILL", "SIGKILL name");
+#endif
 }
 
 void TestEnvironmentVariables(TestRunner& runner) {

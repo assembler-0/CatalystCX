@@ -688,13 +688,13 @@ inline Errors::Result<CommandResult> Child::Wait(std::optional<std::chrono::dura
     const auto end_time = std::chrono::steady_clock::now();
     result.ExecutionTime = end_time - start_time;
 
-    return result;
+    return Errors::Result(result);
 }
 
 inline Errors::Result<void> Child::Kill(int) const {
     if (!TerminateProcess(ProcessHandle, 1)) {
-        return Errors::MakeSystemError(Errors::ErrorCode::KillFailed, 
-                                      "Failed to terminate process");
+        return Errors::Result<void>(
+                Errors::MakeSystemError(Errors::ErrorCode::KillFailed, "Failed to terminate process"));
     }
     return {};
 }
@@ -702,9 +702,9 @@ inline Errors::Result<void> Child::Kill(int) const {
 inline Errors::Result<Child> Command::Spawn() {
     // Validate command
     if (Executable.empty()) {
-        return Errors::MakeError(Errors::ErrorCode::EmptyCommand, 
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::EmptyCommand,
                                 "Command executable cannot be empty",
-                                "", "Provide a valid executable name or path");
+                                "", "Provide a valid executable name or path"));
     }
 
     std::vector<std::string> args_vec;
@@ -712,31 +712,31 @@ inline Errors::Result<Child> Command::Spawn() {
     args_vec.insert(args_vec.end(), Arguments.begin(), Arguments.end());
 
     if (!ExecutionValidator::CanExecuteCommand(args_vec)) {
-        return Errors::MakeError(Errors::ErrorCode::ExecutableNotFound,
-                                "Executable not found: " + Executable,
-                                "", "Verify the executable exists and is in PATH");
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::ExecutableNotFound,
+                                                       "Executable not found: " + Executable, "",
+                                                       "Verify the executable exists and is in PATH"));
     }
 
     // Validate working directory if specified
     if (WorkDir && !fs::exists(*WorkDir)) {
-        return Errors::MakeError(Errors::ErrorCode::InvalidWorkingDirectory,
-                                "Working directory does not exist: " + *WorkDir,
-                                "", "Create the directory or specify a valid path");
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::InvalidWorkingDirectory,
+                                                       "Working directory does not exist: " + *WorkDir, "",
+                                                       "Create the directory or specify a valid path"));
     }
 
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
 
     HANDLE stdout_read, stdout_write, stderr_read, stderr_write;
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
-        return Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed,
-                                      "Failed to create stdout pipe");
+        return Errors::Result<Child>(
+                Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed, "Failed to create stdout pipe"));
     }
 
     if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0)) {
         CloseHandle(stdout_read);
         CloseHandle(stdout_write);
-        return Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed,
-                                      "Failed to create stderr pipe");
+        return Errors::Result<Child>(
+                Errors::MakeSystemError(Errors::ErrorCode::PipeCreationFailed, "Failed to create stderr pipe"));
     }
 
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
@@ -831,13 +831,13 @@ inline Errors::Result<Child> Command::Spawn() {
                 break;
         }
 
-        return Errors::MakeError(Errors::ErrorCode::SpawnFailed,
+        return Errors::Result<Child>(Errors::MakeError(Errors::ErrorCode::SpawnFailed,
                                 "Failed to create process: " + Executable,
                                 "CreateProcessA failed with error " + std::to_string(error_code),
-                                suggestion);
+                                suggestion));
     }
 
-    return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
+    return Errors::Result<Child>(Child(pi.hProcess, pi.hThread, stdout_read, stderr_read));
 }
 
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
