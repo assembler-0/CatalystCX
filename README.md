@@ -140,7 +140,7 @@ auto result = Command("printenv")
     .WorkingDirectory("/tmp")
     .Execute();
 
-std::cout << result.Vaule().Stdout; // "Hello\n"
+std::cout << result.Value().Stdout; // "Hello\n"
 ```
 
 ### Signal Handling and Process Information
@@ -321,7 +321,7 @@ if (!res.IsSuccessful()) {
 ErrorInfo contains:
 - Code (ErrorCode): e.g., ExecutableNotFound, SpawnFailed, ExecutionTimeout
 - Category (ErrorCategory): Validation, System, Process, Timeout, Permission, Resource, Platform
-- Message, Details, Suggestion and SystemErrorCode
+- Message, Details, Suggestion, and SystemErrorCode
 
 ## API Reference (Quick)
 
