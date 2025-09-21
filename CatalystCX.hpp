@@ -17,11 +17,14 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <concepts>
 #include <filesystem>
 #include <future>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -47,9 +50,25 @@ extern char **environ;
 
 namespace fs = std::filesystem;
 
-#ifndef EXIT_FAIL_EC
-#define EXIT_FAIL_EC 127
-#endif
+// Constants
+namespace Constants {
+    constexpr int EXIT_FAIL_EC = 127;
+    constexpr size_t PIPE_BUFFER_SIZE = 8192;
+    constexpr size_t STDERR_BUFFER_SIZE = 4096;
+    constexpr int POLL_TIMEOUT_MS = 50;
+    constexpr auto SLEEP_INTERVAL = std::chrono::milliseconds(10);
+}
+
+// Concepts
+namespace Concepts {
+    template<typename T>
+    concept StringLike = std::convertible_to<T, std::string_view>;
+
+    template<typename T>
+    concept DurationLike = requires(T t) {
+        std::chrono::duration_cast<std::chrono::duration<double>>(t);
+    };
+}
 
 struct CommandResult {
     int ExitCode{};
@@ -57,7 +76,7 @@ struct CommandResult {
     std::string Stderr;
     std::chrono::duration<double> ExecutionTime{};
     bool TimedOut = false;
-    
+
     bool KilledBySignal = false;
     int TerminatingSignal = 0;
     bool CoreDumped = false;
@@ -66,20 +85,28 @@ struct CommandResult {
 
     struct ResourceUsage {
 #if defined(__linux__)
-        long UserCpuTime;
-        long SystemCpuTime;
-        long MaxResidentSetSize;
-        long MinorPageFaults;
-        long MajorPageFaults;
-        long VoluntaryContextSwitches;
-        long InvoluntaryContextSwitches;
+        long UserCpuTime = 0;
+        long SystemCpuTime = 0;
+        long MaxResidentSetSize = 0;
+        long MinorPageFaults = 0;
+        long MajorPageFaults = 0;
+        long VoluntaryContextSwitches = 0;
+        long InvoluntaryContextSwitches = 0;
 #elif defined(_WIN32)
-        FILETIME UserTime;
-        FILETIME KernelTime;
-        SIZE_T PeakWorkingSetSize;
-        SIZE_T PageFaultCount;
+        FILETIME UserTime{};
+        FILETIME KernelTime{};
+        SIZE_T PeakWorkingSetSize = 0;
+        SIZE_T PageFaultCount = 0;
 #endif
     } Usage{};
+
+    [[nodiscard]] constexpr bool IsSuccessful() const noexcept {
+        return ExitCode == 0 && !TimedOut && !KilledBySignal;
+    }
+
+    [[nodiscard]] constexpr bool HasOutput() const noexcept {
+        return !Stdout.empty() || !Stderr.empty();
+    }
 };
 
 class Child {
@@ -89,7 +116,7 @@ public:
         : ProcessHandle(process), ThreadHandle(thread), StdoutHandle(stdout_handle), StderrHandle(stderr_handle), PipesClosed(false) {
         ProcessId = GetProcessId(process);
     }
-    
+
     ~Child() {
         if (ProcessHandle != INVALID_HANDLE_VALUE) CloseHandle(ProcessHandle);
         if (ThreadHandle != INVALID_HANDLE_VALUE) CloseHandle(ThreadHandle);
@@ -128,30 +155,43 @@ private:
 
 class Command {
 public:
-    explicit Command(std::string executable) : Executable(std::move(executable)) {}
+    template<Concepts::StringLike T>
+    explicit Command(T&& executable) : Executable(std::forward<T>(executable)) {
+        Arguments.reserve(8); // Reserve space for typical argument count
+    }
 
-    Command& Arg(std::string argument) {
-        Arguments.push_back(std::move(argument));
+    template<Concepts::StringLike T>
+    Command& Arg(T&& argument) {
+        Arguments.emplace_back(std::forward<T>(argument));
         return *this;
     }
 
-    Command& Args(const std::vector<std::string>& arguments) {
-        Arguments.insert(Arguments.end(), arguments.begin(), arguments.end());
+    template<std::ranges::range R>
+    requires Concepts::StringLike<std::ranges::range_value_t<R>>
+    Command& Args(R&& arguments) {
+        if constexpr (std::ranges::sized_range<R>) {
+            Arguments.reserve(static_cast<size_t>(std::ranges::size(arguments)));
+        }
+        std::ranges::copy(arguments, std::back_inserter(Arguments));
         return *this;
     }
 
-    Command& WorkingDirectory(std::string path) {
-        WorkDir = std::move(path);
+    template<Concepts::StringLike T>
+    Command& WorkingDirectory(T&& path) {
+        WorkDir = std::forward<T>(path);
         return *this;
     }
 
-    Command& Environment(const std::string& key, const std::string& value) {
-        EnvVars[key] = value;
+    template<Concepts::StringLike K, Concepts::StringLike V>
+    Command& Environment(K&& key, V&& value) {
+        EnvVars.emplace(std::forward<K>(key), std::forward<V>(value));
         return *this;
     }
 
-    Command& Timeout(std::chrono::duration<double> duration) {
-        TimeoutDuration = duration;
+    template<Concepts::DurationLike D>
+    Command& Timeout(D&& duration) {
+        TimeoutDuration = std::chrono::duration_cast<std::chrono::duration<double>>(
+            std::forward<D>(duration));
         return *this;
     }
 
@@ -175,39 +215,167 @@ class AsyncPipeReader {
 #endif
         std::string Buffer;
         bool Finished = false;
+
+        explicit PipeData(
+#ifdef _WIN32
+            HANDLE handle
+#else
+                const int fd
+#endif
+        ) :
+#ifdef _WIN32
+            Handle(handle)
+#else
+            Fd(fd)
+#endif
+        {
+            Buffer.reserve(Constants::PIPE_BUFFER_SIZE);
+        }
     };
+
+    using Buffer = std::array<char, Constants::PIPE_BUFFER_SIZE>;
+
 public:
 #ifdef _WIN32
-    static std::pair<std::string, std::string> ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle);
+    [[nodiscard]] static std::pair<std::string, std::string> ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle);
 private:
-    static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
+    static bool ReadFromPipe(PipeData& pipe_data, Buffer& buffer) noexcept;
 #else
-    static std::pair<std::string, std::string> ReadPipes(int stdout_fd, int stderr_fd);
+    [[nodiscard]] static std::pair<std::string, std::string> ReadPipes(int stdout_fd, int stderr_fd);
 private:
-
-    static bool ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer);
-    static bool IsPipeOpen(int fd);
+    static bool ReadFromPipe(PipeData& pipe_data, Buffer& buffer) noexcept;
+    static bool IsPipeOpen(int fd) noexcept;
 #endif
 };
 
+namespace Utils {
+    template<Concepts::StringLike T>
+    [[nodiscard]] constexpr bool IsEmpty(const T& str) noexcept {
+        return std::string_view(str).empty();
+    }
+
+    template<std::ranges::range R>
+    [[nodiscard]] constexpr bool IsEmpty(const R& range) noexcept {
+        return std::ranges::empty(range);
+    }
+
+    [[nodiscard]] inline std::string QuoteArgumentWindows(const std::string_view arg) {
+        if (const bool need_quotes = arg.find_first_of(" \t\"") != std::string_view::npos; !need_quotes) return std::string(arg);
+
+        std::string result;
+        result.reserve(arg.size() + 10); // Reserve space for quotes and escaping
+        result.push_back('"');
+
+        size_t backslash_count = 0;
+        for (const char c : arg) {
+            if (c == '\\') {
+                ++backslash_count;
+                continue;
+            }
+            if (c == '"') {
+                result.append(backslash_count * 2 + 1, '\\');
+                result.push_back('"');
+                backslash_count = 0;
+                continue;
+            }
+            if (backslash_count > 0) {
+                result.append(backslash_count, '\\');
+                backslash_count = 0;
+            }
+            result.push_back(c);
+        }
+        if (backslash_count > 0) {
+            result.append(backslash_count * 2, '\\');
+        }
+        result.push_back('"');
+        return result;
+    }
+
+    /**
+     * @brief Expand initializer list or any range-like container into a std::vector
+     * @details This helper allows passing braced-init-lists to Command::Args()
+     * @example Command("git").Args(Utils::Expand({"commit", "-m", "message"}))
+     */
+    template<Concepts::StringLike T>
+    [[nodiscard]] constexpr std::vector<std::string> Expand(std::initializer_list<T> args) {
+        std::vector<std::string> result;
+        result.reserve(args.size());
+        for (const auto& arg : args) result.emplace_back(arg);
+        return result;
+    }
+
+    /**
+     * @brief Expand any range into a std::vector (for consistency)
+     * @details Provides a uniform interface for all container types
+     */
+    template<std::ranges::range R>
+    requires Concepts::StringLike<std::ranges::range_value_t<R>>
+    [[nodiscard]] constexpr std::vector<std::string> Expand(R&& range) {
+        std::vector<std::string> result;
+        if constexpr (std::ranges::sized_range<R>) result.reserve(std::ranges::size(range));
+        for (const auto& item : range) result.emplace_back(item);
+        return result;
+    }
+}
+
 class ExecutionValidator {
 public:
-    static bool IsFileExecutable(const std::string& path);
-    static bool IsCommandExecutable(const std::string& command);
-    static bool CanExecuteCommand(const std::vector<std::string>& args);
+    template<Concepts::StringLike T>
+    [[nodiscard]] static bool IsFileExecutable(T&& path) {
+        const std::string_view path_view(path);
+#ifdef _WIN32
+        const DWORD attrs = GetFileAttributesA(std::string(path_view).c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+#else
+        return access(std::string(path_view).c_str(), X_OK) == 0;
+#endif
+    }
+
+    template<Concepts::StringLike T>
+    [[nodiscard]] static bool IsCommandExecutable(T&& command) {
+        const std::string_view cmd_view(command);
+#ifdef _WIN32
+        const std::wstring wcommand(cmd_view.begin(), cmd_view.end());
+        const DWORD needed = SearchPathW(nullptr, wcommand.c_str(), L".exe", 0, nullptr, nullptr);
+        return needed > 0;
+#else
+        if (cmd_view.find('/') != std::string_view::npos) {
+            return access(std::string(cmd_view).c_str(), X_OK) == 0;
+        }
+
+        const char* path_env = getenv("PATH");
+        if (!path_env) return false;
+        const std::string_view path_str(path_env);
+        return std::ranges::any_of(
+            std::views::split(path_str, ':'),
+            [cmd_view](const auto& dir_range) {
+                const std::string_view dir{dir_range.begin(), dir_range.end()};
+                if (dir.empty()) return false;
+                const auto full_path = (std::filesystem::path(dir) / std::string(cmd_view));
+                return ::access(full_path.c_str(), X_OK) == 0;
+            });
+
+#endif
+    }
+
+    template<std::ranges::range R>
+    requires Concepts::StringLike<std::ranges::range_value_t<R>>
+    [[nodiscard]] static bool CanExecuteCommand(const R& args) {
+        return !Utils::IsEmpty(args) && IsCommandExecutable(*std::ranges::begin(args));
+    }
 };
 
 // Windows implementations
 #ifdef _WIN32
 inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
-    auto start_time = std::chrono::steady_clock::now();
+    const auto start_time = std::chrono::steady_clock::now();
     CommandResult result;
 
     // Start asynchronous pipe reader to avoid deadlocks on full pipes
     auto reader_future = std::async(std::launch::async, AsyncPipeReader::ReadPipes, StdoutHandle, StderrHandle);
 
-    DWORD wait_time = timeout ? static_cast<DWORD>(timeout->count() * 1000) : INFINITE;
-    DWORD wait_result = WaitForSingleObject(ProcessHandle, wait_time);
+    const DWORD wait_time = timeout ? static_cast<DWORD>(timeout->count() * 1000.0) : INFINITE;
+    const DWORD wait_result = WaitForSingleObject(ProcessHandle, wait_time);
 
     if (wait_result == WAIT_TIMEOUT) {
         result.TimedOut = true;
@@ -216,14 +384,17 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     }
 
     DWORD exit_code = 0;
-    GetExitCodeProcess(ProcessHandle, &exit_code);
-    result.ExitCode = static_cast<int>(exit_code);
+    if (GetExitCodeProcess(ProcessHandle, &exit_code)) {
+        result.ExitCode = static_cast<int>(exit_code);
+    } else {
+        result.ExitCode = Constants::EXIT_FAIL_EC;
+    }
 
     FILETIME creation_time{}, exit_time{};
     GetProcessTimes(ProcessHandle, &creation_time, &exit_time,
                     &result.Usage.KernelTime, &result.Usage.UserTime);
 
-    PROCESS_MEMORY_COUNTERS pmc;
+    PROCESS_MEMORY_COUNTERS pmc{};
     if (GetProcessMemoryInfo(ProcessHandle, &pmc, sizeof(pmc))) {
         result.Usage.PeakWorkingSetSize = pmc.PeakWorkingSetSize;
         result.Usage.PageFaultCount = pmc.PageFaultCount;
@@ -238,7 +409,7 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     CloseHandle(StderrHandle);
     PipesClosed = true;
 
-    auto end_time = std::chrono::steady_clock::now();
+    const auto end_time = std::chrono::steady_clock::now();
     result.ExecutionTime = end_time - start_time;
 
     return result;
@@ -258,7 +429,7 @@ inline std::optional<Child> Command::Spawn() {
     }
 
     SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    
+
     HANDLE stdout_read, stdout_write, stderr_read, stderr_write;
     if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
         return std::nullopt;
@@ -268,40 +439,27 @@ inline std::optional<Child> Command::Spawn() {
         CloseHandle(stdout_write);
         return std::nullopt;
     }
-    
+
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
-    
+
     STARTUPINFOA si = {sizeof(STARTUPINFOA)};
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = stdout_write;
     si.hStdError = stderr_write;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    
+
     PROCESS_INFORMATION pi = {};
-    
-    auto QuoteArgWin = [](const std::string& s) -> std::string {
-        bool need_quotes = s.find_first_of(" \t\"") != std::string::npos;
-        if (!need_quotes) return s;
-        std::string out;
-        out.push_back('"');
-        size_t bs = 0;
-        for (char c : s) {
-            if (c == '\\') { ++bs; continue; }
-            if (c == '"') { out.append(bs * 2 + 1, '\\'); out.push_back('"'); bs = 0; continue; }
-            if (bs) { out.append(bs, '\\'); bs = 0; }
-            out.push_back(c);
-        }
-        if (bs) out.append(bs * 2, '\\');
-        out.push_back('"');
-        return out;
-    };
-    std::string cmdline = QuoteArgWin(Executable);
-    for (const auto& arg : Arguments) {
+
+    // Build command line using ranges and utility function
+    std::string cmdline = Utils::QuoteArgumentWindows(Executable);
+    const auto quoted_args = Arguments | std::views::transform(Utils::QuoteArgumentWindows);
+
+    for (const auto& quoted_arg : quoted_args) {
         cmdline += ' ';
-        cmdline += QuoteArgWin(arg);
+        cmdline += quoted_arg;
     }
-    
+
     // Build environment block: merge current environment with overrides (if any)
     std::string env_block;
     if (!EnvVars.empty()) {
@@ -341,7 +499,7 @@ inline std::optional<Child> Command::Spawn() {
         }
         env_block.push_back('\0');
     }
-    
+
     BOOL success = CreateProcessA(
         nullptr, const_cast<char*>(cmdline.c_str()),
         nullptr, nullptr, TRUE, 0,
@@ -349,23 +507,24 @@ inline std::optional<Child> Command::Spawn() {
         WorkDir ? WorkDir->c_str() : nullptr,
         &si, &pi
     );
-    
+
     CloseHandle(stdout_write);
     CloseHandle(stderr_write);
-    
+
     if (!success) {
         CloseHandle(stdout_read);
         CloseHandle(stderr_read);
         return std::nullopt;
     }
-    
+
     return Child(pi.hProcess, pi.hThread, stdout_read, stderr_read);
 }
 
 inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE stdout_handle, HANDLE stderr_handle) {
     auto read_all = [](HANDLE h) -> std::string {
         std::string acc;
-        std::array<char, 8192> buf{};
+        acc.reserve(Constants::PIPE_BUFFER_SIZE);
+        Buffer buf{};
         DWORD n = 0;
         for (;;) {
             if (!ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &n, nullptr)) {
@@ -385,9 +544,9 @@ inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(HANDLE std
     return {f_out.get(), f_err.get()};
 }
 
-inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
+inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, Buffer& buffer) noexcept {
     DWORD bytes_read;
-    if (ReadFile(pipe_data.Handle, buffer.data(), buffer.size(), &bytes_read, nullptr)) {
+    if (ReadFile(pipe_data.Handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr)) {
         if (bytes_read > 0) {
             pipe_data.Buffer.append(buffer.data(), bytes_read);
             return true;
@@ -396,22 +555,12 @@ inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 
     return false;
 }
 
-inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
-    DWORD attrs = GetFileAttributesA(path.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    std::wstring wcommand(command.begin(), command.end());
-    DWORD needed = SearchPathW(nullptr, wcommand.c_str(), L".exe", 0, nullptr, nullptr);
-    return needed > 0;
-}
 
 #else
 
 // Unix implementations
 inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> timeout) const {
-    auto start_time = std::chrono::steady_clock::now();
+    const auto start_time = std::chrono::steady_clock::now();
 
     CommandResult result;
     int status = 0;
@@ -421,7 +570,7 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     auto reader_future = std::async(std::launch::async, AsyncPipeReader::ReadPipes, StdoutFd, StderrFd);
 
     if (timeout) {
-        auto timeout_time = start_time + *timeout;
+        const auto timeout_time = start_time + *timeout;
         while (std::chrono::steady_clock::now() < timeout_time) {
             const int wait_result = waitpid(ProcessId, &status, WNOHANG);
             if (wait_result == ProcessId) {
@@ -430,14 +579,14 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
             }
 
             if (wait_result == -1) {
-                result.ExitCode = EXIT_FAIL_EC;
+                result.ExitCode = Constants::EXIT_FAIL_EC;
                 result.Stderr = "waitpid failed";
                 break;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(Constants::SLEEP_INTERVAL);
         }
-        
+
         // Check if we timed out
         if (std::chrono::steady_clock::now() >= timeout_time) {
             if (const int wait_result = waitpid(ProcessId, &status, WNOHANG); wait_result == 0) { // Still running
@@ -461,8 +610,9 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
     close(StderrFd);
 
 #ifdef __linux__
-    result.Usage.UserCpuTime = usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec;
-    result.Usage.SystemCpuTime = usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec;
+    constexpr long MICROSECONDS_PER_SECOND = 1000000;
+    result.Usage.UserCpuTime = usage.ru_utime.tv_sec * MICROSECONDS_PER_SECOND + usage.ru_utime.tv_usec;
+    result.Usage.SystemCpuTime = usage.ru_stime.tv_sec * MICROSECONDS_PER_SECOND + usage.ru_stime.tv_usec;
     result.Usage.MaxResidentSetSize = usage.ru_maxrss;
     result.Usage.MinorPageFaults = usage.ru_minflt;
     result.Usage.MajorPageFaults = usage.ru_majflt;
@@ -472,22 +622,22 @@ inline CommandResult Child::Wait(std::optional<std::chrono::duration<double>> ti
 
     // Enhanced process termination analysis
     if (!result.TimedOut) {
-        if (__WIFEXITED(status)) {
-            result.ExitCode = __WEXITSTATUS(status);
-        } else if (__WIFSIGNALED(status)) {
+        if (WIFEXITED(status)) {
+            result.ExitCode = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
             result.KilledBySignal = true;
-            result.TerminatingSignal = __WTERMSIG(status);
+            result.TerminatingSignal = WTERMSIG(status);
             result.ExitCode = 128 + result.TerminatingSignal;
 #ifdef WCOREDUMP
-            result.CoreDumped = __WCOREDUMP(status);
+            result.CoreDumped = WCOREDUMP(status);
 #endif
-        } else if (__WIFSTOPPED(status)) {
+        } else if (WIFSTOPPED(status)) {
             result.Stopped = true;
-            result.StopSignal = __WSTOPSIG(status);
+            result.StopSignal = WSTOPSIG(status);
         }
     }
 
-    auto end_time = std::chrono::steady_clock::now();
+    const auto end_time = std::chrono::steady_clock::now();
     result.ExecutionTime = end_time - start_time;
 
     return result;
@@ -580,7 +730,7 @@ inline std::optional<Child> Command::Spawn() {
 
     if (pid == 0) {
         if (WorkDir && chdir(WorkDir->c_str()) != 0) {
-            _exit(EXIT_FAIL_EC);
+            _exit(Constants::EXIT_FAIL_EC);
         }
 
         for(const auto &[key, value] : EnvVars) {
@@ -589,7 +739,7 @@ inline std::optional<Child> Command::Spawn() {
 
         if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1 ||
             dup2(stderr_pipe[1], STDERR_FILENO) == -1) {
-            _exit(EXIT_FAIL_EC);
+            _exit(Constants::EXIT_FAIL_EC);
         }
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
@@ -602,7 +752,7 @@ inline std::optional<Child> Command::Spawn() {
         argv.push_back(nullptr);
 
         execvp(argv[0], argv.data());
-        _exit(EXIT_FAIL_EC);
+        _exit(Constants::EXIT_FAIL_EC);
     }
 #endif
 
@@ -617,21 +767,21 @@ inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int 
     fcntl(stdout_fd, F_SETFL, O_NONBLOCK);
     fcntl(stderr_fd, F_SETFL, O_NONBLOCK);
 
-    PipeData stdout_data{stdout_fd, {}};
-    PipeData stderr_data{stderr_fd, {}};
+    PipeData stdout_data{stdout_fd};
+    PipeData stderr_data{stderr_fd};
 
-    stdout_data.Buffer.reserve(8192);
-    stderr_data.Buffer.reserve(4096);
+    stdout_data.Buffer.reserve(Constants::PIPE_BUFFER_SIZE);
+    stderr_data.Buffer.reserve(Constants::STDERR_BUFFER_SIZE);
 
-    std::array<char, 8192> read_buffer{};
+    Buffer read_buffer{};
 
     while (!stdout_data.Finished || !stderr_data.Finished) {
-        std::array<pollfd, 2> fds = {
-            {{stdout_fd, POLLIN, 0},
-             {stderr_fd, POLLIN, 0}}
-        };
+        std::array<pollfd, 2> fds = {{
+            {stdout_fd, POLLIN, 0},
+            {stderr_fd, POLLIN, 0}
+        }};
 
-        if (const int poll_result = poll(fds.data(), 2, 50); poll_result > 0) {
+        if (const int poll_result = poll(fds.data(), 2, Constants::POLL_TIMEOUT_MS); poll_result > 0) {
             if (fds[0].revents & POLLIN) {
                 if (!ReadFromPipe(stdout_data, read_buffer)) {
                     stdout_data.Finished = true;
@@ -654,46 +804,17 @@ inline std::pair<std::string, std::string> AsyncPipeReader::ReadPipes(const int 
     return {std::move(stdout_data.Buffer), std::move(stderr_data.Buffer)};
 }
 
-inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, std::array<char, 8192>& buffer) {
+inline bool AsyncPipeReader::ReadFromPipe(PipeData& pipe_data, Buffer& buffer) noexcept {
     const ssize_t bytes_read = read(pipe_data.Fd, buffer.data(), buffer.size());
     if (bytes_read > 0) {
-        pipe_data.Buffer.append(buffer.data(), bytes_read);
+        pipe_data.Buffer.append(buffer.data(), static_cast<size_t>(bytes_read));
         return true;
     }
     return bytes_read != 0;
 }
 
-inline bool AsyncPipeReader::IsPipeOpen(const int fd) {
+inline bool AsyncPipeReader::IsPipeOpen(const int fd) noexcept {
     return fcntl(fd, F_GETFD) != -1;
-}
-
-inline bool ExecutionValidator::IsCommandExecutable(const std::string& command) {
-    if (command.find('/') != std::string::npos) return access(command.c_str(), X_OK) == 0;
-
-    const char* path_env = getenv("PATH");
-    if (!path_env) return false;
-
-    std::string path_str(path_env);
-    size_t start = 0;
-    size_t end = path_str.find(':');
-
-    while (start <= path_str.length()) {
-        if (std::string dir = path_str.substr(start, (end == std::string::npos ? path_str.length() : end) - start);
-            !dir.empty()) {
-            std::string full_path = dir + "/" + command;
-            if (access(full_path.c_str(), X_OK) == 0) return true;
-
-        }
-        if (end == std::string::npos) break;
-        start = end + 1;
-        end = path_str.find(':', start);
-    }
-
-    return false;
-}
-
-inline bool ExecutionValidator::IsFileExecutable(const std::string& path) {
-    return access(path.c_str(), X_OK) == 0;
 }
 
 #endif
@@ -703,13 +824,9 @@ inline CommandResult Command::Execute() {
         return child->Wait(TimeoutDuration);
     }
     CommandResult result;
-    result.ExitCode = EXIT_FAIL_EC;
+    result.ExitCode = Constants::EXIT_FAIL_EC;
     result.Stderr = "Failed to spawn process";
     return result;
-}
-
-inline bool ExecutionValidator::CanExecuteCommand(const std::vector<std::string>& args) {
-    return !args.empty() && IsCommandExecutable(args[0]);
 }
 
 class SignalInfo {
@@ -737,7 +854,7 @@ public:
             default: return "UNKNOWN";
         }
 #else
-        static_cast<void>(signal)
+        static_cast<void>(signal);
         return "N/A";
 #endif
     }

@@ -172,6 +172,27 @@ std::cout << "Page Faults: " << result.Usage.PageFaultCount << std::endl;
 
 ## Advanced Usage
 
+### Multiple Arguments
+```cpp
+std::vector<std::string> args = {"arg1", "arg2"};
+cmd.Args(args);
+
+std::array<std::string, 3> args = {"arg1", "arg2", "arg3"};
+cmd.Args(args);
+
+std::initializer_list<std::string> args = {"arg1", "arg2"};
+cmd.Args(args);
+
+cmd.Args(std::vector<std::string_view>{"arg1", "arg2"});
+
+// Or C-style arrays:
+const char* args[] = {"arg1", "arg2"};
+cmd.Args(args);
+
+// Or use builtin expansion:
+cmd.Args(utils::Expand({"arg1", "arg2"}));
+```
+
 ### Batch Processing
 
 ```cpp
@@ -180,7 +201,7 @@ std::vector<std::future<CommandResult>> futures;
 
 for (const auto& file : files) {
     futures.push_back(std::async(std::launch::async, [&file]() {
-        return Command("wc").Args({"-l", file}).Execute();
+        return Command("wc").Args(Utils::Expand({"-l", file})).Execute();
     }));
 }
 
@@ -243,6 +264,6 @@ Contributions are welcome! Please feel free to submit a pull request, open an is
 
 ## License
 
-This project is licensed under the [GPLv3 License](LICENSE) - see the LICENSE file for details.
+This project is licensed under the [GPLv3 License—](LICENSE)see the LICENSE file for details.
 
 ---
